@@ -1,0 +1,4256 @@
+#!/bin/bash
+################################################################################
+#                                   Qemate                                     #
+#                        QEMU Virtual Machine Manager                          #
+################################################################################
+# Description:                                                                 #
+# A streamlined command-line tool for managing QEMU virtual machines.          #
+#                                                                              #
+# Author: Daniel Zilli                                                         #
+# License: BSD 3-Clause License                                                #
+# Version: 1.0.0                                                               #
+#                                                                              #
+################################################################################
+
+# Enable strict error handling and safe pipeline execution
+set -euo pipefail
+IFS=$'\n\t'
+
+#==============================================================================
+# 1. INITIALIZATION AND CONFIGURATION
+#==============================================================================
+
+readonly SCRIPT_VERSION="1.0.0"
+readonly SCRIPT_NAME=$(basename "$0")
+
+# Ensure XDG paths are properly set with fallbacks
+readonly XDG_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
+readonly XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+readonly XDG_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}"
+
+# Global mutex file for critical operations
+readonly GLOBAL_LOCK_FILE="/tmp/qemate.lock"
+readonly LOCK_TIMEOUT=30
+
+# Security constants
+readonly SECURE_PERMISSIONS=0600
+readonly SECURE_DIR_PERMISSIONS=0700
+
+# Declare configuration with secure defaults
+declare -A CONFIG=(
+	[VM_DIR]="$XDG_DATA_HOME/qemate/vms"
+	[LOG_DIR]="$XDG_DATA_HOME/qemate/logs"
+	[TEMP_DIR]="$XDG_CACHE_HOME/qemate/temp"
+	[CONFIG_DIR]="$XDG_CONFIG_HOME/qemate"
+	[DEFAULT_MEMORY]=2048
+	[DEFAULT_CORES]=2
+	[DEFAULT_DISK_SIZE]="20G"
+	[DEFAULT_NETWORK_TYPE]="user"
+	[DEFAULT_BRIDGE_NAME]="br0"
+	[MAX_VMS]=50
+	[MAX_PORTS_PER_VM]=20
+	[MAX_SHARES_PER_VM]=10
+	[MAX_USB_DEVICES]=10
+	[VM_SHUTDOWN_TIMEOUT]=30
+	[DEBUG]=0
+)
+
+# ANSI color codes for formatted output
+declare -r RED='\033[0;31m'
+declare -r GREEN='\033[0;32m'
+declare -r YELLOW='\033[1;33m'
+declare -r NC='\033[0m'
+
+# Logging level definitions
+declare -r LOG_INFO="INFO"
+declare -r LOG_SUCCESS="SUCCESS"
+declare -r LOG_WARN="WARN"
+declare -r LOG_ERROR="ERROR"
+declare -r LOG_DEBUG="DEBUG"
+
+# Global arrays for resource tracking
+declare -a TEMP_RESOURCES=()
+declare -a ACTIVE_LOCKS=()
+
+# VM configuration storage
+declare -A VM_CONFIG
+
+# List of reserved system usernames (for security)
+declare -a RESERVED_USERS=(
+	"root" "daemon" "bin" "sys" "sync" "games" "man" "lp" "mail" "news"
+	"uucp" "proxy" "www-data" "backup" "list" "irc" "gnats" "nobody"
+	"systemd" "systemd-network" "systemd-resolve" "messagebus" "syslog"
+)
+
+# Error trap for debugging and cleanup
+trap 'error_handler ${LINENO} $?' ERR
+trap 'cleanup_handler' EXIT
+trap 'interrupt_handler' INT TERM
+
+#==============================================================================
+# 2. CORE HELPER FUNCTIONS
+#==============================================================================
+
+# Enhanced error handler with debug information
+error_handler() {
+	local line=$1
+	local error_code=${2:-1}
+	local command="${BASH_COMMAND:-unknown}"
+	local func="${FUNCNAME[1]:-main}"
+
+	# Format timestamp
+	local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+
+	# Build error message
+	local error_msg="Error in $func() at line $line"
+	error_msg+="\nCommand: $command"
+	error_msg+="\nExit code: $error_code"
+
+	# Add call stack if debug enabled
+	if [[ "${CONFIG[DEBUG]:-0}" == "1" ]]; then
+		local i=0
+		error_msg+="\n\nCall stack:"
+		while caller $i >/dev/null 2>&1; do
+			local frame=($(caller $i))
+			error_msg+="\n  ${frame[2]}() at line ${frame[0]} in ${frame[1]}"
+			((i++))
+		done
+	fi
+
+	# Log error
+	log "$LOG_ERROR" "$error_msg"
+
+	# Write to error log if configured
+	if [[ -n "${CONFIG[LOG_DIR]:-}" && -d "${CONFIG[LOG_DIR]}" ]]; then
+		echo -e "$timestamp ERROR: $error_msg" >>"${CONFIG[LOG_DIR]}/error.log"
+	fi
+
+	cleanup_handler
+
+	return $error_code
+}
+
+# Cleanup handler for graceful exit
+cleanup_handler() {
+	local error=$?
+
+	# Release all held locks
+	for lock in "${ACTIVE_LOCKS[@]}"; do
+		release_lock "$lock" 2>/dev/null || true
+	done
+
+	# Remove temporary resources
+	for resource in "${TEMP_RESOURCES[@]}"; do
+		if [[ -e "$resource" ]]; then
+			rm -rf "$resource" 2>/dev/null || true
+		fi
+	done
+
+	# Reset arrays
+	TEMP_RESOURCES=()
+	ACTIVE_LOCKS=()
+
+	return "$error"
+}
+
+# Interrupt handler for graceful termination
+interrupt_handler() {
+	log "$LOG_WARN" "Operation interrupted by user"
+	cleanup_handler
+	exit 130
+}
+
+# Enhanced logging function with timestamps and process info
+log() {
+	local level=$1
+	local message=$2
+	local is_debug=${3:-0}
+
+	# Format the log message
+	local formatted_message
+	case "$level" in
+	"$LOG_INFO") formatted_message="${GREEN}[INFO]${NC} $message" ;;
+	"$LOG_SUCCESS") formatted_message="${GREEN}[SUCCESS]${NC} $message" ;;
+	"$LOG_WARN") formatted_message="${YELLOW}[WARN]${NC} $message" ;;
+	"$LOG_ERROR") formatted_message="${RED}[ERROR]${NC} $message" ;;
+	"$LOG_DEBUG")
+		if [[ "${CONFIG[DEBUG]}" == "1" ]]; then
+			formatted_message="[DEBUG] $message"
+		else
+			return 0
+		fi
+		;;
+	*) formatted_message="$message" ;;
+	esac
+
+	# For debug logging, include timestamp and PID
+	if [[ "$is_debug" -eq 1 || "${CONFIG[DEBUG]}" == "1" ]]; then
+		local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+		local pid=$$
+		echo -e "${timestamp} [${pid}] ${formatted_message}"
+	else
+		# For regular user messages, just show the formatted message
+		echo -e "${formatted_message}"
+	fi
+
+	# Log to file if enabled
+	if [[ -n "${CONFIG[LOG_DIR]:-}" && -d "${CONFIG[LOG_DIR]}" ]]; then
+		local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+		local pid=$$
+		echo "${timestamp} [${pid}] ${level}: ${message}" >>"${CONFIG[LOG_DIR]}/qemate.log"
+	fi
+}
+
+# Check if script is running as root
+check_root() {
+	if [[ $EUID -ne 0 ]]; then
+		log "$LOG_ERROR" "This operation requires root privileges"
+		return 1
+	fi
+	return 0
+}
+
+# Secure random string generator
+generate_secure_string() {
+	local length=${1:-32}
+	if command -v openssl >/dev/null 2>&1; then
+		openssl rand -hex $((length / 2))
+	else
+		head -c "$length" /dev/urandom | xxd -p
+	fi
+}
+
+# Secure path validation
+validate_path() {
+	local path=$1
+	local allow_symlinks=${2:-0}
+
+	# Convert to absolute path
+	local abs_path
+	abs_path=$(readlink -f "$path" 2>/dev/null) || return 1
+
+	# Check if path exists
+	if [[ ! -e "$abs_path" ]]; then
+		return 1
+	fi
+
+	# Check for symlinks if not allowed
+	if [[ "$allow_symlinks" -eq 0 && -L "$path" ]]; then
+		return 1
+	fi
+
+	# Check for suspicious paths
+	if [[ "$abs_path" =~ ^(/dev|/proc|/sys|/run) ]]; then
+		return 1
+	fi
+
+	echo "$abs_path"
+	return 0
+}
+
+# Helper function to validate IP addresses
+validate_ip() {
+	local ip=$1
+
+	if [[ ! "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+		return 1
+	fi
+
+	local IFS='.'
+	local -a octets=($ip)
+
+	for octet in "${octets[@]}"; do
+		if ((octet < 0 || octet > 255)); then
+			return 1
+		fi
+	done
+
+	return 0
+}
+
+# Secure temporary file creation
+create_temp_file() {
+	local prefix=${1:-"qemate"}
+	local temp_dir="${CONFIG[TEMP_DIR]}"
+
+	# Ensure temp directory exists with proper permissions
+	if [[ ! -d "$temp_dir" ]]; then
+		mkdir -p "$temp_dir"
+		chmod "$SECURE_DIR_PERMISSIONS" "$temp_dir"
+	fi
+
+	# Create temporary file with secure permissions
+	local temp_file
+	temp_file=$(mktemp "${temp_dir}/${prefix}.XXXXXXXXXX")
+	chmod "$SECURE_PERMISSIONS" "$temp_file"
+
+	# Track for cleanup
+	TEMP_RESOURCES+=("$temp_file")
+	echo "$temp_file"
+}
+
+# Secure file locking mechanism
+acquire_lock() {
+	local lock_file=$1
+	local timeout=${2:-$LOCK_TIMEOUT}
+	local start_time=$SECONDS
+	local pid=$$
+
+	# First, ensure the parent directory exists with correct permissions
+	local lock_dir=$(dirname "$lock_file")
+	if [[ ! -d "$lock_dir" ]]; then
+		mkdir -p "$lock_dir" 2>/dev/null || {
+			log "$LOG_ERROR" "Cannot create lock directory: $lock_dir"
+			return 1
+		}
+	fi
+
+	# Add debug logging
+	log "$LOG_DEBUG" "Attempting to acquire lock: $lock_file"
+
+	while true; do
+		if mkdir "$lock_file" 2>/dev/null; then
+			echo "$pid" >"$lock_file/pid" || {
+				rmdir "$lock_file" 2>/dev/null
+				log "$LOG_ERROR" "Cannot write PID file"
+				return 1
+			}
+			ACTIVE_LOCKS+=("$lock_file")
+			log "$LOG_DEBUG" "Lock acquired successfully"
+			return 0
+		fi
+
+		# Check for stale lock
+		if [[ -f "$lock_file/pid" ]]; then
+			local lock_pid
+			lock_pid=$(cat "$lock_file/pid" 2>/dev/null)
+			if ! kill -0 "$lock_pid" 2>/dev/null; then
+				log "$LOG_DEBUG" "Removing stale lock from PID $lock_pid"
+				rm -rf "$lock_file"
+				continue
+			fi
+		fi
+
+		# Check timeout
+		if ((SECONDS - start_time > timeout)); then
+			log "$LOG_ERROR" "Lock acquisition timed out after $timeout seconds"
+			return 1
+		fi
+
+		sleep 0.1
+	done
+}
+
+# Release acquired lock
+release_lock() {
+	local lock_file=$1
+
+	if [[ -d "$lock_file" && -f "$lock_file/pid" ]]; then
+		local pid
+		pid=$(cat "$lock_file/pid" 2>/dev/null)
+		if [[ "$pid" == "$$" ]]; then
+			rm -rf "$lock_file"
+			ACTIVE_LOCKS=("${ACTIVE_LOCKS[@]/$lock_file/}")
+			return 0
+		fi
+	fi
+	return 1
+}
+
+# Modified read_vm_config function
+read_vm_config() {
+	local name=$1
+	local config_file="${CONFIG[VM_DIR]}/${name}/config"
+	local error=0
+	local validated_name
+
+	# Validate input using new method
+	if ! validate_vm_name "$name" 64 validated_name; then
+		return 1
+	fi
+
+	# Check config file exists and is secure
+	if [[ ! -f "$config_file" ]]; then
+		log "$LOG_ERROR" "VM configuration not found: $validated_name"
+		return 1
+	fi
+
+	# Validate file permissions
+	local file_perms
+	file_perms=$(stat -c "%a" "$config_file")
+	if [[ "$file_perms" != "600" ]]; then
+		log "$LOG_ERROR" "Insecure permissions on config file: $config_file"
+		return 1
+	fi
+
+	# Clear previous configuration
+	declare -g -A VM_CONFIG=()
+
+	# Read and validate configuration
+	while IFS='=' read -r key value; do
+		# Skip comments and empty lines
+		[[ "$key" =~ ^[[:space:]]*# ]] && continue
+		[[ -z "$key" ]] && continue
+
+		# Clean input
+		key=$(echo "$key" | tr -d '[:space:]')
+		value=$(echo "$value" | tr -d '"' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+
+		# Skip empty keys
+		[[ -z "$key" ]] && continue
+
+		# Store in VM_CONFIG
+		VM_CONFIG[$key]=$value
+
+	done <"$config_file"
+
+	# Validate required fields
+	local -a required_fields=(NAME MEMORY CORES MACHINE_TYPE)
+	for field in "${required_fields[@]}"; do
+		if [[ -z "${VM_CONFIG[$field]:-}" ]]; then
+			log "$LOG_ERROR" "Missing required field: $field"
+			error=1
+		fi
+	done
+
+	return $error
+}
+
+#==============================================================================
+# 4. VALIDATION LAYER
+#==============================================================================
+
+# Modified validate_vm_name function that doesn't echo output
+validate_vm_name() {
+	local name=$1
+	local max_length=${2:-64}
+	local -n result=${3:-_unused_} # Use reference parameter if provided
+
+	# First do basic format validation
+	if [[ ! "$name" =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]*$ ]]; then
+		log "$LOG_ERROR" "Invalid VM name format. Use alphanumeric characters, underscore, or hyphen"
+		return 1
+	fi
+
+	# Check length
+	if ((${#name} > max_length)); then
+		log "$LOG_ERROR" "VM name too long (max $max_length characters)"
+		return 1
+	fi
+
+	# Additional sanitization - strip any potentially dangerous characters
+	name=$(echo "$name" | tr -cd '[:alnum:]_-')
+
+	# Check against reserved names
+	local name_lower
+	name_lower=$(echo "$name" | tr '[:upper:]' '[:lower:]')
+	for reserved in "${RESERVED_USERS[@]}"; do
+		if [[ "$name_lower" == "$reserved" ]]; then
+			log "$LOG_ERROR" "VM name '$name' is reserved and cannot be used"
+			return 1
+		fi
+	done
+
+	# Set the result in the reference variable if provided
+	result="$name"
+	return 0
+}
+
+# Validate port number
+validate_port() {
+	local port=$1
+	local is_host_port=${2:-0} # Flag to indicate if this is the host-side port
+
+	# Check if port is a valid number
+	if ! [[ "$port" =~ ^[0-9]+$ ]]; then
+		log "$LOG_ERROR" "Invalid port number: $port"
+		return 1
+	fi
+
+	# Check port range (valid ports are 1-65535)
+	if ((port < 1 || port > 65535)); then
+		log "$LOG_ERROR" "Port number out of range (1-65535): $port"
+		return 1
+	fi
+
+	# For host ports, check if port is in use
+	if [[ "$is_host_port" -eq 1 ]]; then
+		if command -v ss >/dev/null 2>&1; then
+			if ss -tuln | grep -q ":$port "; then
+				log "$LOG_WARN" "Port $port is already in use on the host"
+				return 1
+			fi
+		elif command -v netstat >/dev/null 2>&1; then
+			if netstat -tuln | grep -q ":$port "; then
+				log "$LOG_WARN" "Port $port is already in use on the host"
+				return 1
+			fi
+		fi
+	fi
+
+	return 0
+}
+
+# Configuration validation for SMB shares
+validate_smb_config() {
+	local name=$1
+	local config_file="${CONFIG[VM_DIR]}/${name}/config"
+	local error=0
+
+	# Check if Samba is installed
+	if ! command -v smbd &>/dev/null; then
+		log "$LOG_ERROR" "Samba server (smbd) not found. Please install samba package"
+		error=1
+	fi
+
+	# Verify Samba service is running
+	if ! systemctl is-active --quiet smbd; then
+		log "$LOG_ERROR" "Samba service (smbd) is not running"
+		error=1
+	fi
+
+	# Check SMB configuration exists
+	if [[ ! -f "/etc/samba/smb.conf" ]]; then
+		log "$LOG_ERROR" "Samba configuration file not found"
+		error=1
+	fi
+
+	return $error
+}
+
+# Verify if a VM exists by checking its configuration file
+check_vm_exists() {
+	local name=$1
+	local config_file="${CONFIG[VM_DIR]}/${name}/config"
+	local validated_name
+
+	# Validate input
+	if [[ -z "$name" ]]; then
+		log "$LOG_ERROR" "VM name cannot be empty"
+		return 1
+	fi
+
+	# Validate VM name using new method
+	if ! validate_vm_name "$name" 64 validated_name; then
+		return 1
+	fi
+
+	# Check if VM directory exists
+	if [[ ! -d "${CONFIG[VM_DIR]}/${validated_name}" ]]; then
+		log "$LOG_ERROR" "VM '$validated_name' not found"
+		return 1
+	fi
+
+	# Check config file exists and is readable
+	if [[ ! -f "$config_file" ]] || [[ ! -r "$config_file" ]]; then
+		log "$LOG_ERROR" "VM '$validated_name' configuration not accessible"
+		return 1
+	fi
+
+	# Validate config file has required fields
+	if ! grep -q "^NAME=" "$config_file"; then
+		log "$LOG_ERROR" "VM '$validated_name' has invalid configuration"
+		return 1
+	fi
+
+	return 0
+}
+
+# Check if a VM is currently running
+check_vm_running() {
+	local name=$1
+	local pattern="guest=${name},process=qemu-${name}"
+
+	# Validate input
+	if [[ -z "$name" ]]; then
+		log "$LOG_ERROR" "VM name cannot be empty"
+		return 1
+	fi
+
+	# First verify VM exists
+	if ! check_vm_exists "$name"; then
+		return 1
+	fi
+
+	# Check for running process with exact name pattern
+	if pgrep -f "$pattern" >/dev/null 2>&1; then
+		return 0
+	fi
+
+	return 1
+}
+
+#==============================================================================
+# 3. PARSE FUNCTIONS
+#==============================================================================
+# Command Parser Functions
+parse_vm_command() {
+	local subcommand=$1
+	shift
+
+	case "$subcommand" in
+	create)
+		local name="" memory="${CONFIG[DEFAULT_MEMORY]}" cores="${CONFIG[DEFAULT_CORES]}" disk_size="${CONFIG[DEFAULT_DISK_SIZE]}"
+		while [[ $# -gt 0 ]]; do
+			case "$1" in
+			--memory)
+				memory="$2"
+				shift 2
+				;;
+			--cores)
+				cores="$2"
+				shift 2
+				;;
+			--disk)
+				disk_size="$2"
+				shift 2
+				;;
+			*)
+				if [[ -z "$name" ]]; then
+					name="$1"
+				fi
+				shift
+				;;
+			esac
+		done
+		create_vm "$name" "$memory" "$cores" "$disk_size"
+		;;
+   start)
+        local name_or_id="" iso="" headless=0
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+            --iso)
+                if [[ -n "$2" ]]; then
+                    iso="$2"
+                    shift 2
+                else
+                    log "$LOG_ERROR" "Missing ISO file path"
+                    return 1
+                fi
+                ;;
+            --headless)
+                headless=1
+                shift
+                ;;
+            *)
+                if [[ -z "$name_or_id" ]]; then
+                    name_or_id="$1"
+                    shift
+                else
+                    shift
+                fi
+                ;;
+            esac
+        done
+
+        if [[ -z "$name_or_id" ]]; then
+            log "$LOG_ERROR" "VM name or ID is required"
+            echo "Usage: qemate vm start NAME|ID [--iso PATH] [--headless]"
+            return 1
+        fi
+
+        start_vm "$name_or_id" "$iso" "$headless"
+        ;;
+    stop)
+        local name_or_id="" force=0
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+            --force)
+                force=1
+                shift
+                ;;
+            *)
+                name_or_id="$1"
+                shift
+                ;;
+            esac
+        done
+        if [[ -z "$name_or_id" ]]; then
+            log "$LOG_ERROR" "VM name or ID is required"
+            echo "Usage: qemate vm stop NAME|ID [--force]"
+            return 1
+        fi
+        
+        # Convert ID to name if necessary
+        if [[ "$name_or_id" =~ ^[0-9]+$ ]]; then
+            local vm_name=$(get_vm_name_from_id "$name_or_id")
+            if [ -z "$vm_name" ]; then
+                log "$LOG_ERROR" "No VM found with ID: $name_or_id"
+                return 1
+            fi
+            name_or_id=$vm_name
+        fi
+        
+        stop_vm "$name_or_id" "$force"
+        ;;
+    remove)
+        local name_or_id="" force=0
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+            --force)
+                force=1
+                shift
+                ;;
+            *)
+                name_or_id="$1"
+                shift
+                ;;
+            esac
+        done
+        if [[ -z "$name_or_id" ]]; then
+            log "$LOG_ERROR" "VM name or ID is required"
+            echo "Usage: qemate vm remove NAME|ID [--force]"
+            return 1
+        fi
+        
+        # Convert ID to name if necessary
+        if [[ "$name_or_id" =~ ^[0-9]+$ ]]; then
+            local vm_name=$(get_vm_name_from_id "$name_or_id")
+            if [ -z "$vm_name" ]; then
+                log "$LOG_ERROR" "No VM found with ID: $name_or_id"
+                return 1
+            fi
+            name_or_id=$vm_name
+        fi
+        
+        delete_vm "$name_or_id" "$force"
+        ;;
+	list)
+		list_vms
+		;;
+
+	status)
+        if [[ $# -lt 1 ]]; then
+            log "$LOG_ERROR" "VM name or ID is required"
+            echo "Usage: qemate vm status NAME|ID"
+            return 1
+        fi
+        local name_or_id="$1"
+        
+        # Convert ID to name if necessary
+        if [[ "$name_or_id" =~ ^[0-9]+$ ]]; then
+            local vm_name=$(get_vm_name_from_id "$name_or_id")
+            if [ -z "$vm_name" ]; then
+                log "$LOG_ERROR" "No VM found with ID: $name_or_id"
+                return 1
+            fi
+            name_or_id=$vm_name
+        fi
+        
+        show_vm_status "$name_or_id"
+		;;
+	bridge)
+		local bridge_cmd=$1
+		shift || true
+
+		case "$bridge_cmd" in
+		setup)
+			local bridge_name="" bridge_ip="" netmask="255.255.255.0"
+			while [[ $# -gt 0 ]]; do
+				case "$1" in
+				--name)
+					bridge_name="$2"
+					shift 2
+					;;
+				--ip)
+					bridge_ip="$2"
+					shift 2
+					;;
+				--netmask)
+					netmask="$2"
+					shift 2
+					;;
+				*)
+					log "$LOG_ERROR" "Unknown option: $1"
+					return 1
+					;;
+				esac
+			done
+
+			if [[ -z "$bridge_name" ]]; then
+				log "$LOG_ERROR" "Bridge name is required"
+				return 1
+			fi
+
+			setup_bridge_interface "$bridge_name" "$bridge_ip" "$netmask"
+			;;
+
+		attach)
+			local bridge_name="" interface=""
+			while [[ $# -gt 0 ]]; do
+				case "$1" in
+				--name)
+					bridge_name="$2"
+					shift 2
+					;;
+				--interface)
+					interface="$2"
+					shift 2
+					;;
+				*)
+					log "$LOG_ERROR" "Unknown option: $1"
+					return 1
+					;;
+				esac
+			done
+
+			if [[ -z "$bridge_name" || -z "$interface" ]]; then
+				log "$LOG_ERROR" "Bridge name and interface are required"
+				return 1
+			fi
+
+			attach_interface_to_bridge "$bridge_name" "$interface"
+			;;
+
+		list)
+			list_bridges
+			;;
+
+		dhcp)
+			local bridge_name="" start_ip="" end_ip="" lease_time="12h"
+			while [[ $# -gt 0 ]]; do
+				case "$1" in
+				--name)
+					bridge_name="$2"
+					shift 2
+					;;
+				--start)
+					start_ip="$2"
+					shift 2
+					;;
+				--end)
+					end_ip="$2"
+					shift 2
+					;;
+				--lease)
+					lease_time="$2"
+					shift 2
+					;;
+				*)
+					log "$LOG_ERROR" "Unknown option: $1"
+					return 1
+					;;
+				esac
+			done
+
+			if [[ -z "$bridge_name" || -z "$start_ip" || -z "$end_ip" ]]; then
+				log "$LOG_ERROR" "Bridge name, start IP, and end IP are required"
+				return 1
+			fi
+
+			setup_bridge_dhcp "$bridge_name" "$start_ip" "$end_ip" "$lease_time"
+			;;
+
+		cleanup)
+			local bridge_name=""
+			while [[ $# -gt 0 ]]; do
+				case "$1" in
+				--name)
+					bridge_name="$2"
+					shift 2
+					;;
+				*)
+					log "$LOG_ERROR" "Unknown option: $1"
+					return 1
+					;;
+				esac
+			done
+
+			if [[ -z "$bridge_name" ]]; then
+				log "$LOG_ERROR" "Bridge name is required"
+				return 1
+			fi
+
+			cleanup_bridge "$bridge_name"
+			;;
+
+		*)
+			log "$LOG_ERROR" "Unknown bridge command: $bridge_cmd"
+			echo "Valid commands: setup, attach, list, dhcp, cleanup"
+			return 1
+			;;
+		esac
+		;;
+
+	*)
+		log "$LOG_ERROR" "Unknown vm command: $subcommand"
+		echo "Valid commands: create, start, stop, remove, list, status"
+		return 1
+		;;
+	esac
+}
+
+parse_net_command() {
+	local subcommand=$1
+	shift
+
+	log "$LOG_DEBUG" "parse_net_command called with subcommand: $subcommand, args: $*"
+
+	case "$subcommand" in
+	set)
+		# This part handles network type setting
+		local name="" type=""
+		log "$LOG_DEBUG" "Processing network set command"
+		while [[ $# -gt 0 ]]; do
+			case "$1" in
+			--type)
+				if [[ -n "$2" ]]; then
+					type="$2"
+					log "$LOG_DEBUG" "Found network type: $type"
+					shift 2
+				else
+					log "$LOG_ERROR" "Missing network type"
+					return 1
+				fi
+				;;
+			*)
+				if [[ -z "$name" ]]; then
+					name="$1"
+					log "$LOG_DEBUG" "Found VM name: $name"
+				fi
+				shift
+				;;
+			esac
+		done
+
+		if [[ -z "$name" ]]; then
+			log "$LOG_ERROR" "VM name is required"
+			echo "Usage: qemate net set NAME --type TYPE"
+			return 1
+		fi
+
+		if [[ -z "$type" ]]; then
+			log "$LOG_ERROR" "Network type is required"
+			echo "Usage: qemate net set NAME --type TYPE"
+			return 1
+		fi
+
+		log "$LOG_DEBUG" "Calling setup_network with: $name $type"
+		setup_network "$name" "$type"
+		;;
+
+	port)
+		local subcmd=$1
+		shift
+		log "$LOG_DEBUG" "Processing port subcommand: $subcmd"
+
+		case "$subcmd" in
+		add)
+			local name="" host="" guest="" proto="tcp"
+			log "$LOG_DEBUG" "Processing port add command"
+
+			# Get VM name first
+			if [[ $# -lt 1 ]]; then
+				log "$LOG_ERROR" "VM name is required"
+				echo "Usage: qemate net port add NAME --host PORT --guest PORT [--proto PROTO]"
+				return 1
+			fi
+			name="$1"
+			shift
+
+			# Validate VM exists and check running state
+			if ! check_vm_exists "$name"; then
+				return 1
+			fi
+
+			if check_vm_running "$name"; then
+				log "$LOG_ERROR" "Cannot modify port forwards while VM is running"
+				log "$LOG_INFO" "Please stop the VM first"
+				return 1
+			fi
+
+			# Process remaining arguments
+			while [[ $# -gt 0 ]]; do
+				case "$1" in
+				--host)
+					if [[ -n "$2" ]]; then
+						host="$2"
+						log "$LOG_DEBUG" "Found host port: $host"
+						if ! validate_port "$host" 1; then
+							return 1
+						fi
+						shift 2
+					else
+						log "$LOG_ERROR" "Missing host port"
+						return 1
+					fi
+					;;
+				--guest)
+					if [[ -n "$2" ]]; then
+						guest="$2"
+						log "$LOG_DEBUG" "Found guest port: $guest"
+						if ! validate_port "$guest" 0; then
+							return 1
+						fi
+						shift 2
+					else
+						log "$LOG_ERROR" "Missing guest port"
+						return 1
+					fi
+					;;
+				--proto)
+					if [[ -n "$2" ]]; then
+						proto="$2"
+						log "$LOG_DEBUG" "Found protocol: $proto"
+						if [[ ! "$proto" =~ ^(tcp|udp)$ ]]; then
+							log "$LOG_ERROR" "Invalid protocol. Use tcp or udp"
+							return 1
+						fi
+						shift 2
+					else
+						log "$LOG_ERROR" "Missing protocol"
+						return 1
+					fi
+					;;
+				*)
+					log "$LOG_ERROR" "Unknown option: $1"
+					echo "Usage: qemate net port add NAME --host PORT --guest PORT [--proto PROTO]"
+					return 1
+					;;
+				esac
+			done
+
+			if [[ -z "$host" || -z "$guest" ]]; then
+				log "$LOG_ERROR" "Missing required parameters"
+				log "$LOG_DEBUG" "name=$name host=$host guest=$guest proto=$proto"
+				echo "Usage: qemate net port add NAME --host PORT --guest PORT [--proto PROTO]"
+				return 1
+			fi
+
+			log "$LOG_DEBUG" "Calling setup_network add-port with args: $name add-port $host:$guest:$proto"
+			setup_network "$name" "add-port" "$host:$guest:$proto"
+			return $?
+			;;
+
+		remove)
+			local name="" port="" proto="tcp"
+			log "$LOG_DEBUG" "Processing port remove command"
+
+			# Get VM name first
+			if [[ $# -lt 1 ]]; then
+				log "$LOG_ERROR" "VM name is required"
+				echo "Usage: qemate net port remove NAME --port PORT [--proto PROTO]"
+				return 1
+			fi
+			name="$1"
+			shift
+
+			# Validate VM exists and check running state
+			if ! check_vm_exists "$name"; then
+				return 1
+			fi
+
+			if check_vm_running "$name"; then
+				log "$LOG_ERROR" "Cannot modify port forwards while VM is running"
+				log "$LOG_INFO" "Please stop the VM first"
+				return 1
+			fi
+
+			# Process remaining arguments
+			while [[ $# -gt 0 ]]; do
+				case "$1" in
+				--port)
+					if [[ -n "$2" ]]; then
+						port="$2"
+						log "$LOG_DEBUG" "Found port: $port"
+						if ! validate_port "$port" 1; then
+							return 1
+						fi
+						shift 2
+					else
+						log "$LOG_ERROR" "Missing port number"
+						return 1
+					fi
+					;;
+				--proto)
+					if [[ -n "$2" ]]; then
+						proto="$2"
+						log "$LOG_DEBUG" "Found protocol: $proto"
+						if [[ ! "$proto" =~ ^(tcp|udp)$ ]]; then
+							log "$LOG_ERROR" "Invalid protocol. Use tcp or udp"
+							return 1
+						fi
+						shift 2
+					else
+						log "$LOG_ERROR" "Missing protocol"
+						return 1
+					fi
+					;;
+				*)
+					log "$LOG_ERROR" "Unknown option: $1"
+					echo "Usage: qemate net port remove NAME --port PORT [--proto PROTO]"
+					return 1
+					;;
+				esac
+			done
+
+			if [[ -z "$port" ]]; then
+				log "$LOG_ERROR" "Missing required --port parameter"
+				echo "Usage: qemate net port remove NAME --port PORT [--proto PROTO]"
+				return 1
+			fi
+
+			log "$LOG_DEBUG" "Calling setup_network remove-port with args: $name remove-port $port:$proto"
+			setup_network "$name" "remove-port" "$port:$proto"
+			return $?
+			;;
+
+		list)
+			if [[ $# -lt 1 ]]; then
+				log "$LOG_ERROR" "VM name is required"
+				echo "Usage: qemate net port list NAME"
+				return 1
+			fi
+			local name="$1"
+			log "$LOG_DEBUG" "Listing ports for VM: $name"
+			list_port_forwards "$name"
+			return $?
+			;;
+
+		*)
+			log "$LOG_ERROR" "Unknown port subcommand: $subcmd"
+			echo "Valid subcommands: add, remove, list"
+			return 1
+			;;
+		esac
+		;;
+
+	*)
+		log "$LOG_ERROR" "Unknown network subcommand: $subcommand"
+		echo "Valid subcommands: set, port"
+		return 1
+		;;
+	esac
+}
+
+parse_shared_command() {
+	local subcommand=${1:-""} # Provide default empty value
+	shift || true             # Allow shift to fail gracefully if no arguments
+
+	# Exit with error if no subcommand provided
+	if [[ -z "$subcommand" ]]; then
+		log "$LOG_ERROR" "No subcommand specified"
+		echo "Usage: qemate shared [add|remove|list] [options]"
+		return 1
+	fi
+
+	case "$subcommand" in
+	add)
+		local name="" path="" share_name="" type="" readonly=0 uid=0 gid=0
+		while [[ $# -gt 0 ]]; do
+			case "$1" in
+			--path)
+				path="$2"
+				shift 2
+				;;
+			--name)
+				share_name="$2"
+				shift 2
+				;;
+			--type)
+				type="$2"
+				shift 2
+				;;
+			--readonly)
+				readonly=1
+				shift
+				;;
+			--uid)
+				uid="$2"
+				shift 2
+				;;
+			--gid)
+				gid="$2"
+				shift 2
+				;;
+			*)
+				name="$1"
+				shift
+				;;
+			esac
+		done
+
+		if [[ -z "$name" || -z "$path" || -z "$share_name" || -z "$type" ]]; then
+			log "$LOG_ERROR" "Missing required parameters"
+			echo "Usage: qemate shared add VM_NAME --path PATH --name SHARE_NAME --type TYPE [--readonly] [--uid UID] [--gid GID]"
+			return 1
+		fi
+
+		add_shared_folder "$name" "$path" "$share_name" "$type" "$readonly" "$uid" "$gid"
+		;;
+
+	remove)
+		local name="" share_name=""
+		while [[ $# -gt 0 ]]; do
+			case "$1" in
+			--name)
+				share_name="$2"
+				shift 2
+				;;
+			*)
+				name="$1"
+				shift
+				;;
+			esac
+		done
+		remove_shared_folder "$name" "$share_name"
+		;;
+
+	list)
+		if [[ $# -lt 1 ]]; then
+			log "$LOG_ERROR" "VM name required"
+			echo "Usage: qemate shared list VM_NAME"
+			return 1
+		fi
+		list_shared_folders "$1"
+		;;
+	esac
+}
+
+parse_usb_command() {
+	local subcommand=${1:-""}
+	shift || true # Allow shift to fail gracefully if no more parameters
+
+	case "$subcommand" in
+	add)
+		local name num temp=0
+		while [[ $# -gt 0 ]]; do
+			case "$1" in
+			--num)
+				num="$2"
+				shift 2
+				;;
+			--temp)
+				temp=1
+				shift
+				;;
+			*)
+				name="$1"
+				shift
+				;;
+			esac
+		done
+		add_usb_device "$name" "$num" "$temp"
+		;;
+
+	remove)
+		local name num
+		while [[ $# -gt 0 ]]; do
+			case "$1" in
+			--num)
+				num="$2"
+				shift 2
+				;;
+			*)
+				name="$1"
+				shift
+				;;
+			esac
+		done
+		remove_usb_device "$name" "$num"
+		;;
+
+	list)
+		local name=""
+		if [ $# -gt 0 ]; then
+			name="$1"
+		fi
+		list_usb_devices "$name"
+		;;
+
+	query)
+		local num="$1"
+		query_usb_device "$num"
+		;;
+	esac
+}
+
+# Parse command help
+parse_help_command() {
+	local command=$1
+
+	case "$command" in
+	vm)
+		show_vm_help
+		;;
+	net | network)
+		show_network_help
+		;;
+	shared)
+		show_shared_help
+		;;
+	usb)
+		show_usb_help
+		;;
+	bridge)
+		show_network_help | grep -A 30 "BRIDGE MANAGEMENT"
+		;;
+	*)
+		show_help
+		;;
+	esac
+}
+
+#==============================================================================
+# 3. CORE VM OPERATIONS
+#==============================================================================
+
+# Get VM name from ID
+get_vm_name_from_id() {
+    local vm_dir="${CONFIG[VM_DIR]}"
+    local target_id=$1
+    local current_id=0
+    
+    # Validate input is a number
+    if ! [[ "$target_id" =~ ^[0-9]+$ ]]; then
+        return 1
+    fi
+    
+    while IFS= read -r vm_path; do
+        if [[ ! -d "$vm_path" ]] || [[ ! -f "$vm_path/config" ]]; then
+            continue
+        fi
+        current_id=$((current_id + 1))
+        if [ "$current_id" -eq "$target_id" ]; then
+            basename "$vm_path"
+            return 0
+        fi
+    done < <(find "$vm_dir" -mindepth 1 -maxdepth 1 -type d | sort)
+    
+    return 1
+}
+
+# Create new VM with built-in optimizations
+create_vm() {
+	local name=$1
+	local memory=${2:-${CONFIG[DEFAULT_MEMORY]}}
+	local cores=${3:-${CONFIG[DEFAULT_CORES]}}
+	local disk_size=${4:-${CONFIG[DEFAULT_DISK_SIZE]}}
+	local vm_path=""
+	local error=0
+
+	# Acquire global lock
+	if ! acquire_lock "$GLOBAL_LOCK_FILE"; then
+		log "$LOG_ERROR" "Failed to acquire lock for VM creation"
+		return 1
+	fi
+
+	# Validate VM name
+	if ! validate_vm_name "$name"; then
+		release_lock "$GLOBAL_LOCK_FILE"
+		return 1
+	fi
+
+	# Validate memory (must be positive number)
+	if ! [[ "$memory" =~ ^[0-9]+$ ]] || [ "$memory" -lt 128 ]; then
+		log "$LOG_ERROR" "Invalid memory size. Must be at least 128MB"
+		release_lock "$GLOBAL_LOCK_FILE"
+		return 1
+	fi
+
+	# Validate cores (must be positive number)
+	if ! [[ "$cores" =~ ^[0-9]+$ ]] || [ "$cores" -lt 1 ]; then
+		log "$LOG_ERROR" "Invalid number of cores. Must be at least 1"
+		release_lock "$GLOBAL_LOCK_FILE"
+		return 1
+	fi
+
+	# Validate disk size
+	if ! [[ "$disk_size" =~ ^[0-9]+[MGT]B?$ ]]; then
+		log "$LOG_ERROR" "Invalid disk size format. Use M, G, or T suffix"
+		release_lock "$GLOBAL_LOCK_FILE"
+		return 1
+	fi
+
+	# Check VM count limit
+	local vm_count
+	vm_count=$(find "${CONFIG[VM_DIR]}" -mindepth 1 -maxdepth 1 -type d | wc -l)
+	if [ "$vm_count" -ge "${CONFIG[MAX_VMS]}" ]; then
+		log "$LOG_ERROR" "Maximum number of VMs (${CONFIG[MAX_VMS]}) reached"
+		release_lock "$GLOBAL_LOCK_FILE"
+		return 1
+	fi
+
+	# Create VM directory with secure permissions
+	vm_path="${CONFIG[VM_DIR]}/${name}"
+	if [ -e "$vm_path" ]; then
+		log "$LOG_ERROR" "VM '$name' already exists"
+		release_lock "$GLOBAL_LOCK_FILE"
+		return 1
+	fi
+
+	if ! mkdir -p "$vm_path"; then
+		log "$LOG_ERROR" "Failed to create VM directory"
+		release_lock "$GLOBAL_LOCK_FILE"
+		return 1
+	fi
+	chmod 700 "$vm_path"
+
+	# Track for cleanup
+	TEMP_RESOURCES+=("$vm_path")
+
+	# Generate secure MAC address
+	local mac_prefix="52:54:00"
+	local mac_suffix
+	mac_suffix=$(generate_secure_string 6 | sed 's/\(..\)/\1:/g; s/:$//')
+	local mac_address="${mac_prefix}:${mac_suffix}"
+
+	# Calculate optimal CPU pinning (reserve CPU 0 for host)
+	local cpu_list=""
+	for ((i = 1; i < cores + 1; i++)); do
+		[ -n "$cpu_list" ] && cpu_list+=","
+		cpu_list+="$i"
+	done
+
+	# Create VM configuration with safe optimizations
+	local config_file="${vm_path}/config"
+	if ! cat >"$config_file" <<EOF; then
+# VM Configuration
+# Created: $(date -Iseconds)
+# Version: ${SCRIPT_VERSION}
+
+# Base Configuration
+NAME="$name"
+MEMORY=$memory
+CORES=$cores
+MACHINE_TYPE="q35"
+NETWORK_TYPE="${CONFIG[DEFAULT_NETWORK_TYPE]}"
+MAC_ADDRESS="$mac_address"
+
+# Safe Performance Optimizations
+CPU_TYPE="host"            							# Use host CPU features for best performance
+ENABLE_KVM=1              							# Enable KVM acceleration
+ENABLE_ACPI=1             							# Enable ACPI power management
+ENABLE_IO_THREADS=1       							# Enable I/O threads for disk operations
+DISK_CACHE="writeback"    							# Safe disk caching mode
+DISK_IO="native"          							# Use native I/O operations
+DISK_DISCARD="unmap"      							# Enable TRIM/discard support
+ENABLE_VIRTIO=1           							# Use virtio devices where applicable
+
+# PCI Device Configuration
+MACHINE_OPTIONS="accel=kvm"
+PCI_BUS="pcie.0"           # Use PCIe bus for devices
+
+# Device Settings
+VIDEO_TYPE="virtio"        # Use virtio GPU driver
+NETWORK_MODEL="virtio-net-pci"
+DISK_INTERFACE="virtio-blk-pci"
+
+# Memory Configuration
+MEMORY_PREALLOC=0          # Don't preallocate memory by default
+MEMORY_SHARE=1            # Allow memory sharing for identical pages
+EOF
+		log "$LOG_ERROR" "Failed to create configuration file"
+		cleanup_handler
+		release_lock "$GLOBAL_LOCK_FILE"
+		return 1
+	fi
+	chmod 600 "$config_file"
+
+	# Create optimized disk image
+	log "$LOG_INFO" "Creating virtual disk ($disk_size)..."
+	if ! qemu-img create -f qcow2 \
+		-o cluster_size=128K,lazy_refcounts=on,preallocation=metadata \
+		"${vm_path}/disk.qcow2" "$disk_size"; then
+		log "$LOG_ERROR" "Failed to create virtual disk"
+		cleanup_handler
+		release_lock "$GLOBAL_LOCK_FILE"
+		return 1
+	fi
+	chmod 600 "${vm_path}/disk.qcow2"
+
+	# VM created successfully - clear tracking
+	TEMP_RESOURCES=()
+	release_lock "$GLOBAL_LOCK_FILE"
+
+	log "$LOG_SUCCESS" "VM '$name' created successfully with optimizations"
+	log "$LOG_INFO" "Configuration: ${memory}MB RAM, ${cores} cores, ${disk_size} disk"
+	return 0
+}
+
+# Start VM with enhanced security
+start_vm() {
+	local name_or_id=$1
+	local iso_file=$2
+	local headless=${3:-0}
+	local vm_name
+
+	# Check if input is an ID
+	if [[ "$name_or_id" =~ ^[0-9]+$ ]]; then
+	    vm_name=$(get_vm_name_from_id "$name_or_id")
+	    if [ -z "$vm_name" ]; then
+	        log "$LOG_ERROR" "No VM found with ID: $name_or_id"
+	        return 1
+	    fi
+	else
+	    vm_name=$name_or_id
+	fi
+
+	# Continue with the original start_vm logic using vm_name
+	local log_file=""
+	local vm_lock="${CONFIG[TEMP_DIR]}/qemu-${vm_name}.lock"
+
+	# Validate inputs and VM existence
+	if ! check_vm_exists "$vm_name"; then
+		return 1
+	fi
+
+	# Check for already running VM
+	if pgrep -f "guest=${vm_name},process=qemu-${vm_name}" >/dev/null; then
+		log "$LOG_ERROR" "VM '$vm_name' is already running"
+		return 1
+	fi
+
+	# Add network prerequisite check
+	if ! check_network_prereqs "$vm_name"; then
+		return 1
+	fi
+
+	# Display environment checks for non-headless mode
+	if [[ "$headless" -eq 0 ]]; then
+		if [[ -z "$DISPLAY" ]]; then
+			log "$LOG_ERROR" "No X11 display available. Use --headless or set DISPLAY variable"
+			return 1
+		fi
+
+		if ! xset q &>/dev/null; then
+			log "$LOG_ERROR" "Cannot connect to X server. Check DISPLAY variable or use --headless"
+			return 1
+		fi
+	fi
+
+	# Acquire VM lock
+	acquire_lock "$vm_lock" || {
+		log "$LOG_ERROR" "Failed to acquire VM lock"
+		return 1
+	}
+
+	# Load VM configuration
+	read_vm_config "$vm_name" || {
+		release_lock "$vm_lock"
+		return 1
+	}
+
+	# Debug VM config
+	log "$LOG_DEBUG" "VM Configuration:"
+	for key in "${!VM_CONFIG[@]}"; do
+		log "$LOG_DEBUG" "  $key: ${VM_CONFIG[$key]}"
+	done
+
+	# Prepare log file
+	log_file="${CONFIG[LOG_DIR]}/${vm_name}_$(date +%Y%m%d_%H%M%S).log"
+	touch "$log_file" || {
+		log "$LOG_ERROR" "Failed to create log file"
+		release_lock "$vm_lock"
+		return 1
+	}
+	chmod "$SECURE_PERMISSIONS" "$log_file"
+	TEMP_RESOURCES+=("$log_file")
+
+	# Initialize QEMU arguments array
+	local -a qemu_args=(
+		"qemu-system-x86_64"
+		"-name" "guest=${vm_name},process=qemu-${vm_name}"
+		"-machine" "type=${VM_CONFIG[MACHINE_TYPE]},accel=kvm"
+		"-cpu" "host,migratable=off"
+		"-smp" "cores=${VM_CONFIG[CORES]},threads=1"
+		"-m" "${VM_CONFIG[MEMORY]}"
+	)
+
+	# Add display configuration based on headless flag
+	if [[ "$headless" -eq 1 ]]; then
+		qemu_args+=(
+			"-display" "none"
+			"-nographic"
+		)
+	else
+		qemu_args+=(
+			"-device" "virtio-vga"
+			"-display" "gtk"
+		)
+	fi
+
+	# Add disk configuration
+	local disk_path="${CONFIG[VM_DIR]}/${vm_name}/disk.qcow2"
+	log "$LOG_DEBUG" "Disk path: $disk_path"
+
+	# Verify disk exists
+	if [[ ! -f "$disk_path" ]]; then
+		log "$LOG_ERROR" "Disk image not found: $disk_path"
+		release_lock "$vm_lock"
+		return 1
+	fi
+
+	qemu_args+=(
+		"-drive" "if=virtio,file=${disk_path},format=qcow2,aio=io_uring,cache=none"
+	)
+
+	# Add ISO if specified
+	if [[ -n "$iso_file" ]]; then
+		validate_path "$iso_file" || {
+			log "$LOG_ERROR" "Invalid ISO file path"
+			release_lock "$vm_lock"
+			return 1
+		}
+		qemu_args+=(
+			"-drive" "if=virtio,file=${iso_file},format=raw,readonly=on,media=cdrom"
+			"-boot" "order=d,once=d"
+		)
+	fi
+
+	# Configure networking
+	log "$LOG_DEBUG" "Starting to configure networking..."
+	local net_args
+	while IFS= read -r arg; do
+		[[ -n "$arg" ]] && qemu_args+=("$arg")
+	done < <(build_network_args "$vm_name")
+
+	# Add shared folder configuration if enabled
+	if [[ "${VM_CONFIG[SHARED_FOLDERS_ENABLED]:-0}" -eq 1 ]]; then
+		log "$LOG_DEBUG" "Starting to configure shared folders..."
+		local share_args
+		while IFS= read -r arg; do
+			# Skip empty lines and debug messages
+			[[ -z "$arg" ]] && continue
+			[[ "$arg" =~ ^\[.*\].*$ ]] && continue
+			[[ "$arg" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}.* ]] && continue
+			qemu_args+=("$arg")
+		done < <(build_share_args "$vm_name")
+	fi
+
+	# Debug final command
+	log "$LOG_DEBUG" "Final QEMU command args:"
+	for ((i = 0; i < ${#qemu_args[@]}; i++)); do
+		log "$LOG_DEBUG" "  ARG[$i]: [${qemu_args[$i]}]"
+	done
+
+	# Start VM process
+	log "$LOG_DEBUG" "Starting QEMU process with ${#qemu_args[@]} arguments..."
+	"${qemu_args[@]}" </dev/null >"$log_file" 2>&1 &
+	local pid=$!
+
+	log "$LOG_DEBUG" "QEMU started with PID: $pid"
+	echo "$pid" >"$vm_lock/pid"
+
+	# Wait and verify process
+	sleep 1
+	if kill -0 "$pid" 2>/dev/null; then
+		log "$LOG_SUCCESS" "VM '$vm_name' started successfully (PID: $pid)"
+
+		# After VM is started, reconnect persistent USB devices
+		reconnect_usb_devices "$vm_name"
+
+		release_lock "$vm_lock"
+		return 0
+	else
+		log "$LOG_ERROR" "Failed to start VM"
+		cat "$log_file"
+		release_lock "$vm_lock"
+		return 1
+	fi
+}
+
+# Stop VM with enhanced safety checks
+stop_vm() {
+	local name=$1
+	local force=${2:-0}
+	local timeout=${CONFIG[VM_SHUTDOWN_TIMEOUT]}
+	local vm_lock="/tmp/qemu-${name}.lock"
+	local pid=""
+
+	if ! check_vm_running "$name"; then
+		log "$LOG_INFO" "VM '$name' is not running"
+		return 0
+	fi
+
+	# Get VM process ID using consistent pattern matching
+	pid=$(pgrep -f "guest=${name},process=qemu-${name}")
+	if [[ -z "$pid" ]]; then
+		log "$LOG_ERROR" "VM process not found"
+		return 1
+	fi
+
+	if [[ "$force" -eq 0 ]]; then
+		log "$LOG_INFO" "Attempting graceful shutdown..."
+		kill -SIGTERM "$pid"
+
+		# Wait for shutdown
+		local start_time=$SECONDS
+		while kill -0 "$pid" 2>/dev/null; do
+			if ((SECONDS - start_time >= timeout)); then
+				log "$LOG_WARN" "Graceful shutdown timed out, forcing stop"
+				force=1
+				break
+			fi
+			sleep 1
+		done
+	fi
+
+	if [[ "$force" -eq 1 ]]; then
+		log "$LOG_WARN" "Force stopping VM '$name'"
+		kill -9 "$pid"
+
+		# Short wait for force kill
+		sleep 2
+		if kill -0 "$pid" 2>/dev/null; then
+			log "$LOG_ERROR" "Failed to force stop VM"
+			return 1
+		fi
+	fi
+
+	# Add network cleanup
+	cleanup_network "$name"
+
+	# Clean up lock files
+	rm -f "$vm_lock/pid"
+	rm -f "${CONFIG[VM_DIR]}/${name}/disk.qcow2.lock"
+
+	log "$LOG_SUCCESS" "VM '$name' stopped"
+	return 0
+}
+
+# Delete VM with secure cleanup
+delete_vm() {
+	local name=$1
+	local force=${2:-0}
+	local vm_path="${CONFIG[VM_DIR]}/${name}"
+	local vm_lock="/tmp/qemu-${name}.lock"
+
+	# Validate VM state
+	if ! check_vm_exists "$name"; then
+		return 1
+	fi
+
+	# Check if VM is running
+	if check_vm_running "$name"; then
+		if [[ "$force" -eq 1 ]]; then
+			if ! stop_vm "$name" 1; then
+				log "$LOG_ERROR" "Failed to force stop VM"
+				return 1
+			fi
+		else
+			log "$LOG_ERROR" "VM is running. Stop it first or use -f to force"
+			return 1
+		fi
+	fi
+
+	# Acquire global lock
+	if ! acquire_lock "$GLOBAL_LOCK_FILE"; then
+		log "$LOG_ERROR" "Failed to acquire lock for deletion"
+		return 1
+	fi
+
+	# Create list of files to delete
+	local -a files_to_delete=(
+		"$vm_path"
+		"${CONFIG[LOG_DIR]}/${name}_"*".log"
+	)
+
+	# Verify deletion targets
+	local found=0
+	for item in "${files_to_delete[@]}"; do
+		if compgen -G "$item" >/dev/null; then
+			log "$LOG_INFO" "Will delete: $item"
+			found=1
+		fi
+	done
+
+	if [[ "$found" -eq 0 ]]; then
+		log "$LOG_WARN" "No files found to delete"
+		release_lock "$GLOBAL_LOCK_FILE"
+		return 0
+	fi
+
+	# Confirm deletion
+	if [[ "$force" -eq 0 ]]; then
+		local response
+		read -r -p "Are you sure you want to delete VM '$name'? [y/N] " response
+		if [[ ! "$response" =~ ^[Yy]$ ]]; then
+			log "$LOG_INFO" "Deletion cancelled"
+			release_lock "$GLOBAL_LOCK_FILE"
+			return 0
+		fi
+	fi
+
+	# Perform deletion
+	local error=0
+	for item in "${files_to_delete[@]}"; do
+		if compgen -G "$item" >/dev/null; then
+			if ! rm -rf "$item"; then
+				log "$LOG_ERROR" "Failed to delete: $item"
+				error=1
+			fi
+		fi
+	done
+
+	# Clean up locks
+	rm -f "$vm_lock"
+	release_lock "$GLOBAL_LOCK_FILE"
+
+	if [[ "$error" -eq 0 ]]; then
+		log "$LOG_SUCCESS" "VM '$name' deleted successfully"
+		return 0
+	else
+		log "$LOG_ERROR" "Some files could not be deleted"
+		return 1
+	fi
+}
+
+# List all virtual machines and their status
+list_vms() {
+    local vm_dir="${CONFIG[VM_DIR]}"
+    # Validate VM directory exists and is accessible
+    if [[ ! -d "$vm_dir" ]]; then
+        log "$LOG_ERROR" "VM directory not found: $vm_dir"
+        return 1
+    fi
+    
+    # Define colors for VM status
+    local VM_RED=$(tput setaf 1)
+    local VM_GREEN=$(tput setaf 2)
+    local VM_NC=$(tput sgr0)
+    
+    # Print header
+    printf "\n"
+    printf "%-4s %-15s %-10s %-10s %-10s %-12s\n" \
+        "ID" "NAME" "STATUS" "MEMORY" "CORES" "DISK SIZE"
+    printf "%s\n" "======================================================================"
+    
+    # Track VMs found for summary
+    local found_vms=0
+    declare -A vm_ids
+    
+    # First pass: collect VM names and assign IDs
+    while IFS= read -r vm_path; do
+        if [[ ! -d "$vm_path" ]] || [[ ! -f "$vm_path/config" ]]; then
+            continue
+        fi
+        local vm=$(basename "$vm_path")
+        found_vms=$((found_vms + 1))
+        vm_ids["$vm"]=$found_vms
+    done < <(find "$vm_dir" -mindepth 1 -maxdepth 1 -type d | sort)
+    
+    # Second pass: display VM information with IDs
+    while IFS= read -r vm_path; do
+        # Skip if not a directory or no config file
+        if [[ ! -d "$vm_path" ]] || [[ ! -f "$vm_path/config" ]]; then
+            continue
+        fi
+        local vm=$(basename "$vm_path")
+        local vm_id=${vm_ids["$vm"]}
+        local status_raw="stopped"
+        local status
+        
+        # Check VM running status
+        if check_vm_running "$vm"; then
+            status_raw="running"
+        fi
+        
+        # Apply color to status
+        if [[ "$status_raw" == "running" ]]; then
+            status="${VM_GREEN}${status_raw}${VM_NC}"
+        else
+            status="${VM_RED}${status_raw}${VM_NC}"
+        fi
+        
+        # Load VM configuration
+        if ! read_vm_config "$vm"; then
+            log "$LOG_WARN" "Failed to load config for VM: $vm"
+            continue
+        fi
+        
+        local memory="${VM_CONFIG[MEMORY]}"
+        local cores="${VM_CONFIG[CORES]}"
+        
+        # Get disk size
+        local disk_size="N/A"
+        local disk_path="${vm_path}/disk.qcow2"
+        if [[ -f "$disk_path" ]]; then
+            local disk_info=""
+            # Use -U flag when VM is running to avoid locks
+            if [[ "$status_raw" == "running" ]]; then
+                disk_info=$(qemu-img info -U "$disk_path" 2>/dev/null | grep "virtual size:")
+            fi
+            # Try without -U if previous attempt failed or VM is stopped
+            if [[ -z "$disk_info" ]]; then
+                disk_info=$(qemu-img info "$disk_path" 2>/dev/null | grep "virtual size:")
+            fi
+            # Parse disk size information
+            if [[ $disk_info =~ virtual[[:space:]]size:[[:space:]]([0-9.]+)[[:space:]]([KMGT]iB|[KMGT]B) ]]; then
+                local size="${BASH_REMATCH[1]}"
+                local unit="${BASH_REMATCH[2]}"
+                unit=${unit/iB/B} # Normalize units
+                disk_size="${size}${unit}"
+            fi
+        fi
+        
+        # Format memory for display
+        if [[ "$memory" =~ ^[0-9]+$ ]]; then
+            if ((memory >= 1024)); then
+                memory="$((memory / 1024))GB"
+            else
+                memory="${memory}MB"
+            fi
+        fi
+        
+        # Print VM information with ID
+        printf "%-4d %-15s %-10s %-10s %-10s %-12s\n" \
+            "$vm_id" \
+            "$vm" \
+            "$status_raw" \
+            "$memory" \
+            "$cores" \
+            "$disk_size" | sed "s/$status_raw/$status/"
+            
+    done < <(find "$vm_dir" -mindepth 1 -maxdepth 1 -type d | sort)
+    
+    # Print summary
+    printf "\n"
+    if ((found_vms == 0)); then
+        log "$LOG_INFO" "No VMs found"
+    fi
+    return 0
+}
+
+# Complete implementation of show_vm_status
+show_vm_status() {
+	local name=$1
+	local config_file="${CONFIG[VM_DIR]}/${name}/config"
+
+	# Validate VM exists
+	if ! check_vm_exists "$name"; then
+		return 1
+	fi
+
+	# Load VM configuration
+	if ! read_vm_config "$name"; then
+		return 1
+	fi
+
+	# Get VM status with indicator symbol
+	local status_symbol="⭘"
+	local status_text="stopped"
+	if check_vm_running "$name"; then
+		status_symbol="⬤"
+		status_text="running"
+	fi
+
+	# Calculate disk size and usage
+	local disk_path="${CONFIG[VM_DIR]}/${name}/disk.qcow2"
+	local disk_size="unknown"
+	local disk_usage="unknown"
+
+	if [[ -f "$disk_path" ]]; then
+		local disk_info
+		if [[ "$status_text" == "running" ]]; then
+			disk_info=$(qemu-img info -U "$disk_path" 2>/dev/null)
+		else
+			disk_info=$(qemu-img info "$disk_path" 2>/dev/null)
+		fi
+
+		if [[ -n "$disk_info" ]]; then
+			disk_size=$(echo "$disk_info" | grep "virtual size:" | sed -E 's/.*\(([0-9.]+) ([MGT]iB)\).*/\1\2/')
+			disk_usage=$(echo "$disk_info" | grep "disk size:" | awk '{print $3$4}')
+		fi
+	fi
+
+	# Get network configuration
+	local network_type=${VM_CONFIG[NETWORK_TYPE]:-${CONFIG[DEFAULT_NETWORK_TYPE]}}
+	local mac_address=${VM_CONFIG[MAC_ADDRESS]:-"not set"}
+
+	# Display VM information
+	echo "VM Status: $name"
+	echo "============================================"
+	if [[ "$status_text" == "running" ]]; then
+		printf "State:           ${GREEN}%s %s${NC}\n" "$status_symbol" "$status_text"
+	else
+		printf "State:           ${RED}%s %s${NC}\n" "$status_symbol" "$status_text"
+	fi
+	printf "Memory:          %s MB\n" "${VM_CONFIG[MEMORY]}"
+	printf "CPU Cores:       %s\n" "${VM_CONFIG[CORES]}"
+	printf "Disk Size:       %s\n" "$disk_size"
+	printf "Disk Usage:      %s\n" "$disk_usage"
+	printf "Network Type:    %s\n" "$network_type"
+	printf "MAC Address:     %s\n" "$mac_address"
+
+	# Show port forwards if configured
+	if [[ "$network_type" == "user" && "${VM_CONFIG[PORT_FORWARDING_ENABLED]:-0}" == "1" ]]; then
+		echo
+		echo "Port Forwards:"
+		while IFS=':' read -r host guest proto; do
+			printf "  %s → %s (%s)\n" "$host" "$guest" "${proto:-tcp}"
+		done < <(echo "${VM_CONFIG[PORT_FORWARDS]:-}" | tr ',' '\n')
+	fi
+
+	# Show shared folders if enabled
+	if [[ "${VM_CONFIG[SHARED_FOLDERS_ENABLED]:-0}" == "1" ]]; then
+		echo
+		echo "Shared Folders:"
+		while IFS= read -r line; do
+			if [[ $line =~ ^SHARED_FOLDER_.*_PATH= ]]; then
+				local share_name=${line#SHARED_FOLDER_}
+				share_name=${share_name%_PATH=*}
+				local path=$(echo "$line" | cut -d'"' -f2)
+				printf "  %s → %s\n" "$share_name" "$path"
+			fi
+		done <"$config_file"
+	fi
+
+	return 0
+}
+
+#==============================================================================
+# 5. NETWORK MANAGEMENT
+#==============================================================================
+
+# Function to check bridge availability
+is_bridge_available() {
+	local bridge_name=$1
+
+	# Check if bridge exists and is up
+	if ! ip link show "$bridge_name" &>/dev/null; then
+		return 1
+	fi
+
+	if ! ip link show "$bridge_name" | grep -q "state UP"; then
+		return 1
+	fi
+
+	# Check if bridge is allowed in QEMU configuration
+	if [[ ! -f "/etc/qemu/bridge.conf" ]] || ! grep -q "^allow $bridge_name$" "/etc/qemu/bridge.conf"; then
+		return 1
+	fi
+
+	return 0
+}
+
+# Generate unique MAC address for VM
+generate_vm_mac() {
+	local vm_name=$1
+	local prefix="52:54:00" # QEMU vendor prefix
+
+	# Generate deterministic but unique suffix based on VM name
+	local hash
+	hash=$(echo "$vm_name" | md5sum | cut -c1-6)
+	local mac="${prefix}:${hash:0:2}:${hash:2:2}:${hash:4:2}"
+
+	echo "$mac"
+}
+
+check_network_prereqs() {
+	local name=$1
+	local net_type=${VM_CONFIG[NETWORK_TYPE]:-${CONFIG[DEFAULT_NETWORK_TYPE]}}
+
+	case "$net_type" in
+	bridge)
+		local bridge_if=${VM_CONFIG[BRIDGE_INTERFACE]:-${CONFIG[DEFAULT_BRIDGE_NAME]}}
+
+		# Check if bridge exists and is up
+		if ! ip link show "$bridge_if" &>/dev/null; then
+			log "$LOG_ERROR" "Bridge interface '$bridge_if' does not exist"
+			return 1
+		fi
+
+		if ! ip link show "$bridge_if" | grep -q "UP"; then
+			log "$LOG_WARN" "Bridge interface '$bridge_if' is not up"
+			return 1
+		fi
+
+		# Verify QEMU bridge helper permissions
+		local helper="/usr/lib/qemu/qemu-bridge-helper"
+		if [[ ! -x "$helper" ]]; then
+			log "$LOG_ERROR" "QEMU bridge helper not found or not executable"
+			return 1
+		fi
+
+		# Check bridge configuration file
+		local bridge_conf="/etc/qemu/bridge.conf"
+		if [[ ! -f "$bridge_conf" ]] || ! grep -q "allow $bridge_if" "$bridge_conf"; then
+			log "$LOG_ERROR" "Bridge '$bridge_if' not allowed in QEMU configuration"
+			return 1
+		fi
+		;;
+
+	user)
+		# Check if port forwarding is properly configured
+		if [[ "${VM_CONFIG[PORT_FORWARDING_ENABLED]:-0}" -eq 1 ]]; then
+			local forwards
+			IFS=',' read -ra forwards <<<"${VM_CONFIG[PORT_FORWARDS]:-}"
+			for forward in "${forwards[@]}"; do
+				IFS=':' read -r host guest _ <<<"$forward"
+				if ss -tuln | grep -q ":$host "; then
+					log "$LOG_WARN" "Host port $host is already in use"
+				fi
+			done
+		fi
+		;;
+	esac
+
+	return 0
+}
+
+# Network cleanup on VM shutdown
+cleanup_network() {
+	local name=$1
+	local net_type=${VM_CONFIG[NETWORK_TYPE]:-${CONFIG[DEFAULT_NETWORK_TYPE]}}
+
+	case "$net_type" in
+	bridge)
+		# Remove any temporary tap devices
+		local tap_dev="tap_${name}"
+		if ip link show "$tap_dev" &>/dev/null; then
+			ip link set "$tap_dev" down
+			ip link delete "$tap_dev" type tap
+		fi
+		;;
+	esac
+}
+
+# Validate bridge requirements and configuration
+validate_bridge_requirements() {
+	local bridge_name=$1
+	local error=0
+
+	# Check root privileges
+	check_root || return 1
+
+	# Check kernel modules
+	local required_modules=("bridge" "tun" "vhost_net")
+	for module in "${required_modules[@]}"; do
+		if ! lsmod | grep -q "^${module}[[:space:]]"; then
+			if ! modprobe "$module" 2>/dev/null; then
+				log "$LOG_ERROR" "Required kernel module '$module' not available"
+				error=1
+			fi
+		fi
+	done
+
+	# Validate bridge name
+	if [[ ! "$bridge_name" =~ ^[a-zA-Z0-9_-]{1,15}$ ]]; then
+		log "$LOG_ERROR" "Invalid bridge name: must be alphanumeric, max 15 chars"
+		return 1
+	fi
+
+	# Check bridge utilities
+	if ! command -v brctl >/dev/null 2>&1; then
+		log "$LOG_ERROR" "bridge-utils package not installed"
+		error=1
+	fi
+
+	# Check /dev/net/tun access
+	if [[ ! -w "/dev/net/tun" ]]; then
+		log "$LOG_ERROR" "No write access to /dev/net/tun"
+		error=1
+	fi
+
+	# Verify QEMU bridge helper
+	local bridge_helper="/usr/lib/qemu/qemu-bridge-helper"
+	if [[ ! -x "$bridge_helper" ]]; then
+		log "$LOG_ERROR" "QEMU bridge helper not found or not executable"
+		error=1
+	fi
+
+	return $error
+}
+
+# Build network arguments for QEMU command
+build_network_args() {
+	local name=$1
+	local -a args=()
+
+	# Get network type
+	local net_type=${VM_CONFIG[NETWORK_TYPE]:-${CONFIG[DEFAULT_NETWORK_TYPE]}}
+
+	case "$net_type" in
+	user)
+		# Build base netdev argument for user networking
+		local netdev_arg="user,id=net0"
+
+		# Add port forwarding if configured
+		if [[ "${VM_CONFIG[PORT_FORWARDING_ENABLED]:-0}" -eq 1 && -n "${VM_CONFIG[PORT_FORWARDS]:-}" ]]; then
+			local forwards
+			IFS=',' read -ra forwards <<<"${VM_CONFIG[PORT_FORWARDS]}"
+			for forward in "${forwards[@]}"; do
+				IFS=':' read -r host guest proto <<<"$forward"
+				netdev_arg+=",hostfwd=${proto:-tcp}::${host}-:${guest}"
+			done
+		fi
+
+		# Add optional DHCP settings if configured
+		if [[ -n "${VM_CONFIG[DHCP_START]:-}" && -n "${VM_CONFIG[DHCP_END]:-}" ]]; then
+			netdev_arg+=",dhcpstart=${VM_CONFIG[DHCP_START]}"
+			netdev_arg+=",dhcpend=${VM_CONFIG[DHCP_END]}"
+		fi
+
+		args+=("-netdev" "$netdev_arg")
+		;;
+
+	bridge)
+		# Verify bridge requirements first
+		local bridge_if=${VM_CONFIG[BRIDGE_INTERFACE]:-${CONFIG[DEFAULT_BRIDGE_NAME]}}
+		if ! validate_bridge_requirements "$bridge_if"; then
+			return 1
+		fi
+
+		# Check if helper script exists and is executable
+		local helper="/usr/lib/qemu/qemu-bridge-helper"
+		if [[ ! -x "$helper" ]]; then
+			log "$LOG_ERROR" "QEMU bridge helper not found or not executable"
+			return 1
+		fi
+
+		# Set up bridge helper environment
+		export QEMU_BRIDGE_HELPER="$helper"
+
+		# Configure bridge networking with vhost optimization
+		args+=("-netdev" "bridge,id=net0,br=$bridge_if,helper=$helper${VM_CONFIG[VHOST_NET]:-1:+,vhost=on}")
+
+		# Add queuing if configured
+		if [[ -n "${VM_CONFIG[NET_QUEUES]:-}" ]]; then
+			args+=(",queues=${VM_CONFIG[NET_QUEUES]}")
+		fi
+		;;
+
+	none)
+		# No network configuration
+		return 0
+		;;
+
+	*)
+		log "$LOG_ERROR" "Invalid network type: $net_type"
+		return 1
+		;;
+	esac
+
+	# Add network device configuration
+	local model=${VM_CONFIG[NETWORK_MODEL]:-"virtio-net-pci"}
+	local mac=${VM_CONFIG[MAC_ADDRESS]:-$(generate_vm_mac "$name")}
+
+	# Build device arguments
+	local device_arg="$model,netdev=net0,mac=$mac"
+
+	# Add multiqueue support if configured
+	if [[ -n "${VM_CONFIG[NET_QUEUES]:-}" ]]; then
+		device_arg+=",mq=on,vectors=$((${VM_CONFIG[NET_QUEUES]} * 2 + 2))"
+	fi
+
+	# Add optional network optimization parameters
+	if [[ "${VM_CONFIG[NET_OPTIMIZATIONS]:-1}" -eq 1 ]]; then
+		device_arg+=",csum=on,gso=on,guest_tso4=on,guest_tso6=on,guest_ecn=on,guest_ufo=on"
+	fi
+
+	args+=("-device" "$device_arg")
+
+	echo "${args[*]}"
+	return 0
+}
+
+# Helper function for port forward listing
+list_port_forwards() {
+	local name=$1
+	local config_file="${CONFIG[VM_DIR]}/${name}/config"
+
+	log "$LOG_DEBUG" "Listing port forwards for VM: $name"
+
+	# Validate VM exists
+	if ! check_vm_exists "$name"; then
+		return 1
+	fi
+
+	# Load VM configuration
+	if ! read_vm_config "$name"; then
+		return 1
+	fi
+
+	# Check network type
+	if [[ "${VM_CONFIG[NETWORK_TYPE]:-}" != "user" ]]; then
+		log "$LOG_ERROR" "VM '$name' is not configured for NAT networking"
+		return 1
+	fi
+
+	# Display port forwards
+	echo "Port Forwards for VM '$name':"
+	echo "======================================="
+	printf "%-15s %-15s %-10s\n" "HOST PORT" "GUEST PORT" "PROTOCOL"
+	echo "---------------------------------------"
+
+	if [[ "${VM_CONFIG[PORT_FORWARDING_ENABLED]:-0}" == "1" ]] && [[ -n "${VM_CONFIG[PORT_FORWARDS]:-}" ]]; then
+		log "$LOG_DEBUG" "Processing port forwards: ${VM_CONFIG[PORT_FORWARDS]}"
+		echo "${VM_CONFIG[PORT_FORWARDS]}" | tr ',' '\n' | while IFS=':' read -r host guest proto; do
+			[[ -z "$host" ]] && continue
+			printf "%-15s %-15s %-10s\n" "$host" "$guest" "${proto:-tcp}"
+		done
+	else
+		log "$LOG_DEBUG" "No port forwards configured"
+	fi
+
+	return 0
+}
+
+# Helper function to convert CIDR to netmask
+convert_cidr_to_netmask() {
+	local cidr=$1
+	local mask=""
+	local full_part=$((cidr / 8))
+	local partial_part=$((cidr % 8))
+
+	for ((i = 0; i < 4; i++)); do
+		if [ $i -lt $full_part ]; then
+			dot="255"
+		elif [ $i -eq $full_part ]; then
+			dot=$(((256 - 2 ** (8 - partial_part)) % 256))
+		else
+			dot="0"
+		fi
+		mask="${mask}${dot}"
+		[ $i -lt 3 ] && mask="${mask}."
+	done
+
+	echo "$mask"
+}
+
+# Function to validate and manage bridge state
+check_bridge_state() {
+	local bridge_name=$1
+	local required_state=${2:-"up"} # up or down
+
+	# Check if bridge exists
+	if ! ip link show "$bridge_name" &>/dev/null; then
+		log "$LOG_ERROR" "Bridge '$bridge_name' does not exist"
+		return 1
+	fi
+
+	case "$required_state" in
+	up)
+		if ! ip link show "$bridge_name" | grep -q "state UP"; then
+			log "$LOG_INFO" "Bringing bridge '$bridge_name' up"
+			ip link set "$bridge_name" up
+			sleep 1 # Wait for state change
+			if ! ip link show "$bridge_name" | grep -q "state UP"; then
+				log "$LOG_ERROR" "Failed to bring bridge up"
+				return 1
+			fi
+		fi
+		;;
+	down)
+		if ! ip link show "$bridge_name" | grep -q "state DOWN"; then
+			log "$LOG_INFO" "Bringing bridge '$bridge_name' down"
+			ip link set "$bridge_name" down
+			sleep 1 # Wait for state change
+			if ! ip link show "$bridge_name" | grep -q "state DOWN"; then
+				log "$LOG_ERROR" "Failed to bring bridge down"
+				return 1
+			fi
+		fi
+		;;
+	*)
+		log "$LOG_ERROR" "Invalid required state: $required_state"
+		return 1
+		;;
+	esac
+
+	return 0
+}
+
+# Add new function to list bridges
+list_bridges() {
+	log "$LOG_INFO" "Configured Network Bridges:"
+	echo "======================================================================="
+	printf "%-12s %-15s %-15s %-8s %s\n" \
+		"NAME" "IP ADDRESS" "NETMASK" "STATE" "INTERFACES"
+	echo "-----------------------------------------------------------------------"
+
+	# Get list of bridges
+	local bridges=$(brctl show | tail -n +2 | awk '{if($1!="") print $1}')
+
+	if [[ -z "$bridges" ]]; then
+		echo "No bridges configured"
+		return 0
+	fi
+
+	# Display information for each bridge
+	for bridge in $bridges; do
+		local ip_info=$(ip -o -4 addr show dev "$bridge" 2>/dev/null)
+		local ip_addr="N/A"
+		local netmask="N/A"
+		local state="DOWN"
+
+		# Get IP and netmask if configured
+		if [[ -n "$ip_info" ]]; then
+			ip_addr=$(echo "$ip_info" | awk '{print $4}' | cut -d'/' -f1)
+			netmask=$(echo "$ip_info" | awk '{print $4}' | cut -d'/' -f2)
+			netmask=$(convert_cidr_to_netmask "$netmask")
+		fi
+
+		# Get state
+		if ip link show "$bridge" | grep -q "state UP"; then
+			state="UP"
+		fi
+
+		# Get attached interfaces
+		local interfaces=$(brctl show "$bridge" | tail -n +2 |
+			awk -v bridge="$bridge" '{if($1==bridge || $1=="") if(NF>1) print $NF}' |
+			tr '\n' ',' | sed 's/,$//')
+
+		[[ -z "$interfaces" ]] && interfaces="none"
+
+		printf "%-12s %-15s %-15s %-8s %s\n" \
+			"$bridge" \
+			"$ip_addr" \
+			"$netmask" \
+			"$state" \
+			"$interfaces"
+
+		# Show DHCP configuration if enabled
+		local dhcp_conf="/etc/dnsmasq.d/qemate-$bridge.conf"
+		if [[ -f "$dhcp_conf" ]]; then
+			local dhcp_range=$(grep "^dhcp-range=" "$dhcp_conf" | cut -d'=' -f2)
+			if [[ -n "$dhcp_range" ]]; then
+				echo "    └── DHCP: $dhcp_range"
+			fi
+		fi
+	done
+
+	# Show additional bridge details
+	echo
+	log "$LOG_INFO" "Bridge Details:"
+	echo "======================================================================="
+	for bridge in $bridges; do
+		echo "Bridge: $bridge"
+		echo "----------------------------------------"
+		brctl showstp "$bridge" | sed 's/^/    /'
+		echo
+	done
+}
+
+# Setup network configuration
+setup_network() {
+	local name=$1
+	local network_type=$2
+	local config_file="${CONFIG[VM_DIR]}/${name}/config"
+
+	log "$LOG_DEBUG" "setup_network called with: name=$name, type=$network_type, arg3=$3"
+	log "$LOG_DEBUG" "Config file: $config_file"
+
+	# Validate VM exists
+	if ! check_vm_exists "$name"; then
+		log "$LOG_DEBUG" "VM check failed: $name does not exist"
+		log "$LOG_ERROR" "VM '$name' does not exist"
+		return 1
+	fi
+
+	# Check if VM is running and provide clear warning
+	if check_vm_running "$name"; then
+		case "$network_type" in
+		add-port | remove-port)
+			log "$LOG_ERROR" "Cannot modify port forwards while VM is running"
+			log "$LOG_INFO" "Please stop the VM first"
+			return 1
+			;;
+		esac
+	fi
+
+	# Create temporary config
+	local temp_config
+	temp_config=$(create_temp_file "config")
+	if [[ $? -ne 0 ]]; then
+		log "$LOG_DEBUG" "Failed to create temp config file"
+		return 1
+	fi
+	log "$LOG_DEBUG" "Created temp config at: $temp_config"
+
+	# Copy existing config
+	cp "$config_file" "$temp_config"
+	if [[ $? -ne 0 ]]; then
+		log "$LOG_DEBUG" "Failed to copy config file"
+		rm -f "$temp_config"
+		return 1
+	fi
+
+	# Read current config
+	log "$LOG_DEBUG" "Current config content:"
+	cat "$temp_config" | while read -r line; do
+		log "$LOG_DEBUG" "  $line"
+	done
+
+	case "$network_type" in
+	add-port)
+		local port_spec=$3
+		local host guest proto
+		IFS=':' read -r host guest proto <<<"$port_spec"
+		proto=${proto:-tcp}
+
+		log "$LOG_DEBUG" "Processing add-port: host=$host guest=$guest proto=$proto"
+
+		# Read current VM configuration
+		if ! read_vm_config "$name"; then
+			log "$LOG_DEBUG" "Failed to read VM config"
+			rm -f "$temp_config"
+			return 1
+		fi
+
+		# Check network type
+		if [[ "${VM_CONFIG[NETWORK_TYPE]:-user}" != "user" ]]; then
+			log "$LOG_DEBUG" "Invalid network type: ${VM_CONFIG[NETWORK_TYPE]:-user}"
+			log "$LOG_ERROR" "Port forwarding requires NAT networking"
+			rm -f "$temp_config"
+			return 1
+		fi
+
+		# Check for duplicate ports
+		log "$LOG_DEBUG" "Current port forwards: ${VM_CONFIG[PORT_FORWARDS]:-none}"
+		local port_exists=0
+		while IFS=':' read -r existing_host existing_guest existing_proto; do
+			[[ -z "$existing_host" ]] && continue
+			log "$LOG_DEBUG" "Checking existing forward: $existing_host:$existing_guest:${existing_proto:-tcp}"
+			if [[ "$existing_host" == "$host" && "${existing_proto:-tcp}" == "${proto:-tcp}" ]]; then
+				log "$LOG_ERROR" "Port forward already exists: host port $host (${proto:-tcp})"
+				rm -f "$temp_config"
+				return 1
+			fi
+		done < <(echo "${VM_CONFIG[PORT_FORWARDS]:-}" | tr ',' '\n')
+
+		# Enable port forwarding
+		if ! grep -q "^PORT_FORWARDING_ENABLED=" "$temp_config"; then
+			log "$LOG_DEBUG" "Adding PORT_FORWARDING_ENABLED=1"
+			echo "PORT_FORWARDING_ENABLED=1" >>"$temp_config"
+		else
+			log "$LOG_DEBUG" "Updating existing PORT_FORWARDING_ENABLED"
+			sed -i "s/^PORT_FORWARDING_ENABLED=.*/PORT_FORWARDING_ENABLED=1/" "$temp_config"
+		fi
+
+		# Add port forward
+		if ! grep -q "^PORT_FORWARDS=" "$temp_config"; then
+			log "$LOG_DEBUG" "Adding first port forward"
+			echo "PORT_FORWARDS=\"$host:$guest:$proto\"" >>"$temp_config"
+		else
+			log "$LOG_DEBUG" "Appending to existing port forwards"
+			sed -i "/^PORT_FORWARDS=/ s/\"$/,$host:$guest:$proto\"/" "$temp_config"
+		fi
+
+		# Verify changes
+		if ! grep -q "$host:$guest:$proto" "$temp_config"; then
+			log "$LOG_DEBUG" "Verification failed: port forward not found in config"
+			log "$LOG_ERROR" "Failed to add port forward"
+			rm -f "$temp_config"
+			return 1
+		fi
+
+		log "$LOG_SUCCESS" "Successfully added port forward: $host -> $guest ($proto)"
+		;;
+
+	remove-port)
+		local port_spec=$3
+		local port proto
+		IFS=':' read -r port proto <<<"$port_spec"
+		proto=${proto:-tcp}
+
+		log "$LOG_DEBUG" "Processing remove-port: port=$port proto=$proto"
+
+		# Read current VM configuration
+		if ! read_vm_config "$name"; then
+			log "$LOG_DEBUG" "Failed to read VM config"
+			rm -f "$temp_config"
+			return 1
+		fi
+
+		# Check network type
+		if [[ "${VM_CONFIG[NETWORK_TYPE]:-user}" != "user" ]]; then
+			log "$LOG_ERROR" "VM is not configured for NAT networking"
+			rm -f "$temp_config"
+			return 1
+		fi
+
+		# Check if port forwarding is enabled
+		if [[ "${VM_CONFIG[PORT_FORWARDING_ENABLED]:-0}" != "1" ]] || [[ -z "${VM_CONFIG[PORT_FORWARDS]:-}" ]]; then
+			log "$LOG_ERROR" "No port forwards configured for VM '$name'"
+			rm -f "$temp_config"
+			return 1
+		fi
+
+		log "$LOG_DEBUG" "Current port forwards: ${VM_CONFIG[PORT_FORWARDS]}"
+
+		# Remove the port forward
+		local found=0
+		local new_forwards=""
+		while IFS=':' read -r host guest existing_proto; do
+			[[ -z "$host" ]] && continue
+			log "$LOG_DEBUG" "Checking forward: $host:$guest:${existing_proto:-tcp}"
+			if [[ "$host" == "$port" && "${existing_proto:-tcp}" == "$proto" ]]; then
+				found=1
+				log "$LOG_DEBUG" "Found matching port forward to remove"
+				continue
+			fi
+			[[ -n "$new_forwards" ]] && new_forwards+=","
+			new_forwards+="$host:$guest:${existing_proto:-tcp}"
+		done < <(echo "${VM_CONFIG[PORT_FORWARDS]}" | tr ',' '\n')
+
+		if [[ "$found" -eq 0 ]]; then
+			log "$LOG_ERROR" "Port forward not found: $port ($proto)"
+			rm -f "$temp_config"
+			return 1
+		fi
+
+		# Update configuration
+		if [[ -n "$new_forwards" ]]; then
+			log "$LOG_DEBUG" "Updating port forwards to: $new_forwards"
+			sed -i "s/^PORT_FORWARDS=.*/PORT_FORWARDS=\"$new_forwards\"/" "$temp_config"
+		else
+			# No more port forwards, remove the configuration
+			log "$LOG_DEBUG" "Removing port forwarding configuration"
+			sed -i '/^PORT_FORWARDS=/d' "$temp_config"
+			sed -i '/^PORT_FORWARDING_ENABLED=/d' "$temp_config"
+		fi
+
+		log "$LOG_SUCCESS" "Successfully removed port forward: $port ($proto)"
+		;;
+
+	nat | bridge | none)
+		# Update network type
+		log "$LOG_DEBUG" "Setting network type to: $network_type"
+		case "$network_type" in
+		nat)
+			log "$LOG_DEBUG" "Configuring NAT networking"
+			sed -i "s/^NETWORK_TYPE=.*/NETWORK_TYPE=\"user\"/" "$temp_config"
+			# Keep existing port forwards if any
+			log "$LOG_SUCCESS" "Network type set to NAT"
+			;;
+
+		bridge)
+			log "$LOG_DEBUG" "Configuring bridge networking"
+			sed -i "s/^NETWORK_TYPE=.*/NETWORK_TYPE=\"bridge\"/" "$temp_config"
+			# Remove port forwarding configuration as it's not compatible with bridge mode
+			sed -i '/^PORT_FORWARDS=/d' "$temp_config"
+			sed -i '/^PORT_FORWARDING_ENABLED=/d' "$temp_config"
+			log "$LOG_SUCCESS" "Network type set to bridge mode"
+			log "$LOG_INFO" "Port forwarding configuration has been removed"
+			;;
+
+		none)
+			log "$LOG_DEBUG" "Disabling networking"
+			sed -i "s/^NETWORK_TYPE=.*/NETWORK_TYPE=\"none\"/" "$temp_config"
+			# Remove all network-related configuration
+			sed -i '/^PORT_FORWARDS=/d' "$temp_config"
+			sed -i '/^PORT_FORWARDING_ENABLED=/d' "$temp_config"
+			sed -i '/^BRIDGE_INTERFACE=/d' "$temp_config"
+			log "$LOG_SUCCESS" "Networking disabled"
+			log "$LOG_INFO" "All network configuration has been removed"
+			;;
+		esac
+		;;
+
+	*)
+		log "$LOG_ERROR" "Invalid network command: $network_type"
+		rm -f "$temp_config"
+		return 1
+		;;
+	esac
+
+	# Show final config for debugging
+	log "$LOG_DEBUG" "Final config content:"
+	cat "$temp_config" | while read -r line; do
+		log "$LOG_DEBUG" "  $line"
+	done
+
+	# Update config atomically
+	log "$LOG_DEBUG" "Moving temp config to final location"
+	if ! mv "$temp_config" "$config_file"; then
+		log "$LOG_ERROR" "Failed to update configuration"
+		rm -f "$temp_config"
+		return 1
+	fi
+
+	chmod "$SECURE_PERMISSIONS" "$config_file"
+	log "$LOG_DEBUG" "Configuration update completed successfully"
+
+	return 0
+}
+
+# Create and configure bridge interface
+setup_bridge_interface() {
+	local bridge_name=$1
+	local bridge_ip=$2
+	local netmask=${3:-"255.255.255.0"}
+
+	# Check root privileges
+	check_root || return 1
+
+	# Validate bridge name
+	if [[ ! "$bridge_name" =~ ^[a-zA-Z0-9_-]{1,15}$ ]]; then
+		log "$LOG_ERROR" "Invalid bridge name. Use alphanumeric, underscore, or hyphen (max 15 chars)"
+		return 1
+	fi
+
+	# Validate IP address if provided
+	if [[ -n "$bridge_ip" ]]; then
+		if ! validate_ip "$bridge_ip"; then
+			log "$LOG_ERROR" "Invalid IP address format: $bridge_ip"
+			return 1
+		fi
+	fi
+
+	# Check if bridge already exists
+	if ip link show "$bridge_name" &>/dev/null; then
+		log "$LOG_WARN" "Bridge '$bridge_name' already exists"
+		return 0
+	fi
+
+	# Load required kernel modules
+	local required_modules=("bridge" "tun" "vhost_net")
+	for module in "${required_modules[@]}"; do
+		if ! lsmod | grep -q "^${module}[[:space:]]" && ! modprobe "$module"; then
+			log "$LOG_ERROR" "Failed to load required kernel module: $module"
+			return 1
+		fi
+	done
+
+	# Create bridge interface
+	if ! brctl addbr "$bridge_name"; then
+		log "$LOG_ERROR" "Failed to create bridge interface"
+		return 1
+	fi
+
+	# Configure bridge parameters
+	brctl stp "$bridge_name" on     # Enable spanning tree
+	brctl setfd "$bridge_name" 2    # Set forward delay
+	brctl sethello "$bridge_name" 2 # Set hello time
+
+	# Configure bridge for optimal VM performance
+	echo 1 >"/proc/sys/net/ipv4/ip_forward"
+	local bridge_path="/sys/class/net/$bridge_name/bridge"
+	[[ -f "$bridge_path/multicast_snooping" ]] && echo 0 >"$bridge_path/multicast_snooping"
+	[[ -f "$bridge_path/ageing_time" ]] && echo 30000 >"$bridge_path/ageing_time"
+
+	# Set bridge up
+	ip link set "$bridge_name" up
+
+	# Configure IP if provided
+	if [[ -n "$bridge_ip" ]]; then
+		if ! ip addr add "$bridge_ip/$netmask" dev "$bridge_name"; then
+			log "$LOG_ERROR" "Failed to configure bridge IP"
+			ip link set "$bridge_name" down
+			brctl delbr "$bridge_name"
+			return 1
+		fi
+	fi
+
+	# Create QEMU bridge configuration
+	local bridge_conf="/etc/qemu/bridge.conf"
+	local bridge_dir="/etc/qemu"
+
+	# Create directory if it doesn't exist
+	mkdir -p "$bridge_dir"
+
+	# Add bridge to configuration if not already present
+	if [[ ! -f "$bridge_conf" ]] || ! grep -q "^allow $bridge_name$" "$bridge_conf"; then
+		echo "allow $bridge_name" >>"$bridge_conf"
+	fi
+
+	# Set secure permissions
+	chmod 640 "$bridge_conf"
+
+	# Create dnsmasq base configuration
+	local dnsmasq_conf="/etc/dnsmasq.d/qemate-$bridge_name.conf"
+	mkdir -p "$(dirname "$dnsmasq_conf")"
+	cat >"$dnsmasq_conf" <<EOF
+# Qemate bridge configuration for $bridge_name
+interface=$bridge_name
+bind-interfaces
+except-interface=lo
+EOF
+	chmod 644 "$dnsmasq_conf"
+
+	log "$LOG_SUCCESS" "Bridge interface '$bridge_name' configured successfully"
+	return 0
+}
+
+# Attach physical interface to bridge
+attach_interface_to_bridge() {
+	local bridge_name=$1
+	local interface=$2
+
+	# Check root privileges
+	check_root || return 1
+
+	# Validate interface exists
+	if ! ip link show "$interface" &>/dev/null; then
+		log "$LOG_ERROR" "Interface '$interface' not found"
+		return 1
+	fi
+
+	# Check bridge exists
+	if ! ip link show "$bridge_name" &>/dev/null; then
+		log "$LOG_ERROR" "Bridge '$bridge_name' not found"
+		return 1
+	fi
+
+	# Check if interface is already bridged
+	if brctl show | grep -q "\s$interface$"; then
+		log "$LOG_ERROR" "Interface '$interface' is already attached to a bridge"
+		return 1
+	fi
+
+	# Store interface configuration
+	local interface_ip=$(ip -o -4 addr show dev "$interface" | awk '{print $4}')
+	local interface_routes=$(ip route show dev "$interface")
+
+	# Remove IP configuration from interface
+	if [[ -n "$interface_ip" ]]; then
+		ip addr flush dev "$interface"
+	fi
+
+	# Add interface to bridge
+	if ! brctl addif "$bridge_name" "$interface"; then
+		log "$LOG_ERROR" "Failed to add interface to bridge"
+		# Restore IP configuration
+		[[ -n "$interface_ip" ]] && ip addr add "$interface_ip" dev "$interface"
+		return 1
+	fi
+
+	# Set interface up
+	ip link set "$interface" up
+
+	# Move IP configuration to bridge if it wasn't already configured
+	if [[ -n "$interface_ip" ]] && ! ip -o -4 addr show dev "$bridge_name" | grep -q "$interface_ip"; then
+		ip addr add "$interface_ip" dev "$bridge_name"
+	fi
+
+	# Update routing if needed
+	while read -r route; do
+		[[ -n "$route" ]] && ip route replace "$route" dev "$bridge_name"
+	done <<<"$interface_routes"
+
+	log "$LOG_SUCCESS" "Interface '$interface' attached to bridge '$bridge_name'"
+	return 0
+}
+
+# Setup DHCP range for bridge networking
+setup_bridge_dhcp() {
+	local bridge_name=$1
+	local dhcp_start=$2
+	local dhcp_end=$3
+	local lease_time=${4:-"12h"}
+
+	# Check root privileges
+	check_root || return 1
+
+	# Verify dnsmasq is installed
+	if ! command -v dnsmasq >/dev/null 2>&1; then
+		log "$LOG_ERROR" "dnsmasq is required for DHCP service"
+		return 1
+	fi
+
+	# Validate IP addresses
+	for ip in "$dhcp_start" "$dhcp_end"; do
+		if ! validate_ip "$ip"; then
+			log "$LOG_ERROR" "Invalid IP address: $ip"
+			return 1
+		fi
+	done
+
+	# Validate lease time format
+	if ! [[ "$lease_time" =~ ^[0-9]+[hmd]$ ]]; then
+		log "$LOG_ERROR" "Invalid lease time format. Use format: <number>[h|m|d]"
+		return 1
+	fi
+
+	# Create dnsmasq configuration
+	local config_file="/etc/dnsmasq.d/qemate-$bridge_name.conf"
+
+	# Backup existing config if it exists
+	[[ -f "$config_file" ]] && cp "$config_file" "${config_file}.bak"
+
+	# Create new configuration
+	cat >"$config_file" <<EOF
+# Qemate DHCP configuration for $bridge_name
+interface=$bridge_name
+bind-interfaces
+except-interface=lo
+dhcp-range=$dhcp_start,$dhcp_end,$lease_time
+dhcp-option=option:router,$dhcp_start
+dhcp-lease-max=253
+log-dhcp
+EOF
+
+	chmod 644 "$config_file"
+
+	# Restart dnsmasq service
+	if ! systemctl restart dnsmasq; then
+		log "$LOG_ERROR" "Failed to restart dnsmasq service"
+		# Restore backup if it exists
+		[[ -f "${config_file}.bak" ]] && mv "${config_file}.bak" "$config_file"
+		return 1
+	fi
+
+	log "$LOG_SUCCESS" "DHCP configured for bridge '$bridge_name'"
+	log "$LOG_INFO" "DHCP range: $dhcp_start - $dhcp_end (lease time: $lease_time)"
+	return 0
+}
+
+# Cleanup bridge configuration
+cleanup_bridge() {
+	local bridge_name=$1
+	local force=${2:-0}
+
+	# Check root privileges
+	check_root || return 1
+
+	# Check if bridge exists
+	if ! ip link show "$bridge_name" &>/dev/null; then
+		log "$LOG_ERROR" "Bridge '$bridge_name' does not exist"
+		return 1
+	fi
+
+	# Check for connected VMs
+	local vm_count=0
+	for vm in "${CONFIG[VM_DIR]}"/*; do
+		if [[ -f "$vm/config" ]] && grep -q "^BRIDGE_INTERFACE=\"$bridge_name\"" "$vm/config"; then
+			vm_count=$((vm_count + 1))
+		fi
+	done
+
+	if [[ $vm_count -gt 0 && $force -eq 0 ]]; then
+		log "$LOG_ERROR" "$vm_count VM(s) are configured to use this bridge"
+		log "$LOG_ERROR" "Use --force to remove bridge anyway"
+		return 1
+	fi
+
+	# Get list of attached interfaces
+	local interfaces=$(brctl show "$bridge_name" | tail -n +2 |
+		awk -v bridge="$bridge_name" '{if($1==bridge || $1=="") if(NF>1) print $NF}')
+
+	# Detach interfaces
+	for interface in $interfaces; do
+		log "$LOG_INFO" "Detaching interface '$interface' from bridge"
+		ip link set "$interface" down
+		brctl delif "$bridge_name" "$interface"
+		ip link set "$interface" up
+	done
+
+	# Bring bridge down
+	check_bridge_state "$bridge_name" "down"
+
+	# Remove bridge
+	if ! brctl delbr "$bridge_name"; then
+		log "$LOG_ERROR" "Failed to remove bridge"
+		return 1
+	fi
+
+	# Remove DHCP configuration
+	local dhcp_conf="/etc/dnsmasq.d/qemate-$bridge_name.conf"
+	if [[ -f "$dhcp_conf" ]]; then
+		rm -f "$dhcp_conf"
+		systemctl restart dnsmasq
+	fi
+
+	# Remove from QEMU bridge configuration
+	local bridge_conf="/etc/qemu/bridge.conf"
+	if [[ -f "$bridge_conf" ]]; then
+		sed -i "/^allow $bridge_name$/d" "$bridge_conf"
+	fi
+
+	log "$LOG_SUCCESS" "Bridge '$bridge_name' removed successfully"
+	return 0
+}
+
+#==============================================================================
+# 6. SHARED FOLDER MANAGEMENT
+#==============================================================================
+
+# Setup SMB share for Windows VM
+setup_smb_share() {
+	local name=$1
+	local host_path=$2
+	local share_name=$3
+	local readonly=${4:-0}
+	local config_file="${CONFIG[VM_DIR]}/${name}/config"
+
+	# Generate secure credentials for SMB
+	local smb_user="qemu_${name}"
+	local smb_pass=$(generate_secure_string 16)
+	local smb_conf="/etc/samba/smb.conf"
+	local share_conf="/etc/samba/shares.conf"
+
+	# Create Samba user if it doesn't exist
+	if ! pdbedit -L | grep -q "^${smb_user}:"; then
+		(
+			echo "$smb_pass"
+			echo "$smb_pass"
+		) | smbpasswd -s -a "$smb_user"
+	fi
+
+	# Create share configuration
+	cat >>"$share_conf" <<EOF
+[$share_name]
+    path = $host_path
+    valid users = $smb_user
+    read only = ${readonly}
+    browseable = yes
+    guest ok = no
+    create mask = 0644
+    directory mask = 0755
+EOF
+
+	# Include share configuration in main smb.conf if not already included
+	if ! grep -q "include = $share_conf" "$smb_conf"; then
+		echo "include = $share_conf" >>"$smb_conf"
+	fi
+
+	# Restart Samba service
+	systemctl restart smbd
+
+	# Store credentials securely
+	local creds_file="${CONFIG[VM_DIR]}/${name}/.smb_creds"
+	cat >"$creds_file" <<EOF
+username=$smb_user
+password=$smb_pass
+EOF
+	chmod 600 "$creds_file"
+
+	return 0
+}
+
+# Build shared folder arguments
+build_share_args() {
+	local name=$1
+	log "$LOG_DEBUG" "============================================="
+	log "$LOG_DEBUG" "Starting build_share_args for VM: $name"
+	log "$LOG_DEBUG" "============================================="
+	# Check if shared folders are enabled
+	if [[ "${VM_CONFIG[SHARED_FOLDERS_ENABLED]:-0}" != "1" ]]; then
+		log "$LOG_DEBUG" "Shared folders not enabled"
+		return 0
+	fi
+	# Get share type
+	local share_type=${VM_CONFIG[SHARED_FOLDER_TYPE]:-}
+	log "$LOG_DEBUG" "Share type: $share_type"
+	case "$share_type" in
+	virtio-9p)
+		# Process each shared folder configuration
+		while IFS= read -r line; do
+			if [[ $line =~ ^SHARED_FOLDER_(.*)_PATH= ]]; then
+				local share_name="${BASH_REMATCH[1]}"
+				# Use consistent ID for both fsdev and mount tag
+				local safe_id=$(echo "${share_name}" | tr '[:upper:]' '[:lower:]')
+				local path=$(echo "$line" | cut -d'"' -f2)
+				local tag="virtfs_${safe_id}"
+				local readonly=$(grep "^SHARED_FOLDER_${share_name}_READONLY=" "${CONFIG[VM_DIR]}/${name}/config" | cut -d'=' -f2 || echo "0")
+
+				# Build fsdev options
+				local fsdev_opts="local,path=${path},security_model=mapped"
+				fsdev_opts+=",writeout=immediate"
+				fsdev_opts+=",id=fs_${safe_id}"
+
+				# Add readonly if enabled
+				[[ "$readonly" == "1" ]] && fsdev_opts+=",readonly"
+
+				# Output the device arguments
+				echo "-fsdev"
+				echo "$fsdev_opts"
+				echo "-device"
+				echo "virtio-9p-pci,fsdev=fs_${safe_id},mount_tag=${tag}"
+			fi
+		done <"${CONFIG[VM_DIR]}/${name}/config"
+		;;
+	smb)
+		# SMB share handling (unchanged)
+		log "$LOG_DEBUG" "SMB share type detected"
+		local shares
+		shares=$(grep "^SHARED_FOLDER_.*_PATH=" "${CONFIG[VM_DIR]}/${name}/config")
+		# Get SMB credentials
+		local creds_file="${CONFIG[VM_DIR]}/${name}/.smb_creds"
+		if [[ ! -f "$creds_file" ]]; then
+			log "$LOG_ERROR" "SMB credentials not found"
+			return 1
+		fi
+		local smb_user
+		local smb_pass
+		smb_user=$(grep "^username=" "$creds_file" | cut -d'=' -f2)
+		smb_pass=$(grep "^password=" "$creds_file" | cut -d'=' -f2)
+		while IFS= read -r line; do
+			if [[ $line =~ ^SHARED_FOLDER_(.*)_PATH=\"(.*)\"$ ]]; then
+				local share_name="${BASH_REMATCH[1]}"
+				local path="${BASH_REMATCH[2]}"
+				echo "-netdev"
+				echo "user,id=smb_${share_name},smb=${path},smbserver=localhost,smbuser=${smb_user},smbpassword=${smb_pass}"
+				echo "-device"
+				echo "virtio-net-pci,netdev=smb_${share_name}"
+			fi
+		done <<<"$shares"
+		;;
+	esac
+	return 0
+}
+
+# Add shared folder to VM configuration
+add_shared_folder() {
+	local name=$1
+	local host_path=$2
+	local share_name=$3
+	local share_type=$4
+	local readonly=${5:-0}
+	local uid=${6:-0}
+	local gid=${7:-0}
+	local config_file="${CONFIG[VM_DIR]}/${name}/config"
+
+	# Validate inputs
+	if ! validate_vm_name "$name" ||
+		[ -z "$host_path" ] ||
+		[ -z "$share_name" ] ||
+		! [[ "$share_type" =~ ^(linux|windows)$ ]]; then
+		log "$LOG_ERROR" "Invalid parameters"
+		return 1
+	fi
+
+	# Validate VM state
+	if ! check_vm_exists "$name" ||
+		check_vm_running "$name"; then
+		return 1
+	fi
+
+	# Validate share path
+	local validated_path
+	validated_path=$(validate_path "$host_path") || {
+		log "$LOG_ERROR" "Invalid share path"
+		return 1
+	}
+
+	# Additional validation for Windows shares
+	if [[ "$share_type" == "windows" ]]; then
+		if ! validate_smb_config "$name"; then
+			return 1
+		fi
+
+		# Setup SMB share
+		if ! setup_smb_share "$name" "$validated_path" "$share_name" "$readonly"; then
+			log "$LOG_ERROR" "Failed to setup SMB share"
+			return 1
+		fi
+	fi
+
+	# Create temporary config
+	local temp_config
+	temp_config=$(create_temp_file "config") || return 1
+
+	# Copy existing config
+	cp "$config_file" "$temp_config" || return 1
+
+	# Enable shared folders if needed
+	if ! grep -q "^SHARED_FOLDERS_ENABLED=1" "$temp_config"; then
+		{
+			echo "SHARED_FOLDERS_ENABLED=1"
+			echo "SHARED_FOLDER_TYPE=\"$([ "$share_type" = "linux" ] && echo "virtio-9p" || echo "smb")\""
+		} >>"$temp_config"
+	fi
+
+	# Add share configuration
+	{
+		echo "SHARED_FOLDER_${share_name}_PATH=\"$validated_path\""
+		echo "SHARED_FOLDER_${share_name}_TAG=\"$share_name\""
+		echo "SHARED_FOLDER_${share_name}_READONLY=$readonly"
+
+		# Add uid/gid for Linux shares
+		if [[ "$share_type" == "linux" ]]; then
+			if [[ "$uid" != "0" ]]; then
+				echo "SHARED_FOLDER_${share_name}_UID=$uid"
+			fi
+			if [[ "$gid" != "0" ]]; then
+				echo "SHARED_FOLDER_${share_name}_GID=$gid"
+			fi
+		fi
+
+		# Add SMB-specific configuration
+		if [[ "$share_type" == "windows" ]]; then
+			echo "SHARED_FOLDER_${share_name}_SMB=1"
+		fi
+	} >>"$temp_config"
+
+	# Update config atomically
+	mv "$temp_config" "$config_file" || return 1
+	chmod 600 "$config_file"
+
+	# Additional instructions for Windows shares
+	if [[ "$share_type" == "windows" ]]; then
+		log "$LOG_SUCCESS" "Added Windows shared folder '$share_name'"
+		log "$LOG_INFO" "Important: In the Windows VM, you need to:"
+		log "$LOG_INFO" "1. Install QEMU Guest Agent"
+		log "$LOG_INFO" "2. Map network drive to: \\\\10.0.2.4\\$share_name"
+		log "$LOG_INFO" "3. Use the credentials stored in ${CONFIG[VM_DIR]}/${name}/.smb_creds"
+	else
+		log "$LOG_SUCCESS" "Added Linux shared folder '$share_name'"
+		if [[ "$uid" != "0" || "$gid" != "0" ]]; then
+			log "$LOG_INFO" "Folder will be mounted with uid=$uid, gid=$gid"
+		fi
+	fi
+
+	return 0
+}
+
+# Remove a shared folder
+remove_shared_folder() {
+	local name=$1
+	local share_name=$2
+	local config_file="${CONFIG[VM_DIR]}/${name}/config"
+
+	# Validate VM state
+	if ! check_vm_exists "$name"; then
+		return 1
+	fi
+
+	if check_vm_running "$name"; then
+		log "$LOG_ERROR" "VM must be stopped to remove shares"
+		return 1
+	fi
+
+	# Verify share exists
+	if ! grep -q "^SHARED_FOLDER_${share_name}_" "$config_file"; then
+		log "$LOG_ERROR" "Share '$share_name' not found"
+		return 1
+	fi
+
+	# Check if it's a Windows share
+	local is_windows_share=0
+	if grep -q "^SHARED_FOLDER_${share_name}_SMB=1" "$config_file"; then
+		is_windows_share=1
+	fi
+
+	# Create backup
+	local backup_file="${config_file}.bak.$(date +%Y%m%d_%H%M%S)"
+	if ! cp "$config_file" "$backup_file"; then
+		log "$LOG_ERROR" "Failed to create backup"
+		return 1
+	fi
+	chmod 600 "$backup_file"
+
+	# Create temporary config
+	local temp_config
+	temp_config=$(create_temp_file "config") || return 1
+
+	# Remove share entries
+	grep -v "^SHARED_FOLDER_${share_name}_" "$config_file" >"$temp_config"
+
+	# Check if this was the last share
+	if ! grep -q "^SHARED_FOLDER_.*_PATH=" "$temp_config"; then
+		# Remove global sharing configuration
+		sed -i '/^SHARED_FOLDERS_ENABLED=/d' "$temp_config"
+		sed -i '/^SHARED_FOLDER_TYPE=/d' "$temp_config"
+	fi
+
+	# Update config atomically
+	mv "$temp_config" "$config_file" || return 1
+	chmod 600 "$config_file"
+
+	# Cleanup Windows-specific configurations if needed
+	if [[ "$is_windows_share" -eq 1 ]]; then
+		# Remove SMB share configuration
+		local share_conf="/etc/samba/shares.conf"
+		if [[ -f "$share_conf" ]]; then
+			sed -i "/\[${share_name}\]/,/^$/d" "$share_conf"
+			systemctl restart smbd
+		fi
+
+		# Remove credentials if this was the last Windows share
+		if ! grep -q "^SHARED_FOLDER_.*_SMB=1" "$config_file"; then
+			rm -f "${CONFIG[VM_DIR]}/${name}/.smb_creds"
+		fi
+	fi
+	log "$LOG_SUCCESS" "Share '$share_name' removed"
+	log "$LOG_INFO" "Configuration backup saved as: $backup_file"
+
+	return 0
+}
+
+# List all shared folders for a VM
+list_shared_folders() {
+	local name=$1
+	local config_file="${CONFIG[VM_DIR]}/${name}/config"
+
+	log "$LOG_DEBUG" "Function invoked with VM name: $name"
+	log "$LOG_DEBUG" "Expected config file path: $config_file"
+
+	if [[ ! -f "$config_file" ]]; then
+		log "$LOG_ERROR" "Config file does not exist: $config_file"
+		return 1
+	fi
+
+	log "$LOG_DEBUG" "Starting list_shared_folders function"
+	log "$LOG_DEBUG" "Config file contents:\n$(cat "$config_file")"
+
+	# Validate VM
+	if ! check_vm_exists "$name"; then
+		log "$LOG_ERROR" "VM check failed"
+		return 1
+	fi
+	log "$LOG_DEBUG" "VM validation successful"
+
+	# Check if shared folders are enabled
+	if ! grep -q "^SHARED_FOLDERS_ENABLED=1" "$config_file"; then
+		log "$LOG_INFO" "No shared folders configured for VM '$name'"
+		return 0
+	fi
+	log "$LOG_DEBUG" "Shared folders are enabled"
+
+	# Get share type
+	local share_type
+	share_type=$(grep "^SHARED_FOLDER_TYPE=" "$config_file" | cut -d'=' -f2 | tr -d '"')
+	log "$LOG_DEBUG" "Share type detected: $share_type"
+
+	# Print configuration header
+	log "$LOG_INFO" "Shared Folder Configuration for VM: '$name'"
+	printf "\n%-20s : %s\n" "Sharing Type" "$([[ "$share_type" == "smb" ]] && echo "Windows (SMB)" || echo "Linux (virtio-9p)")"
+
+	printf "\nConfigured Shares:\n"
+	printf "%s\n" "=================="
+
+	# Find and display shares
+	local share_count=0
+	local shares
+	shares=$(grep "SHARED_FOLDER_.*_PATH=" "$config_file" | grep -v '^\s*$')
+	log "$LOG_DEBUG" "Shares detected in config file:\n$shares"
+
+	if [[ -z "$shares" ]]; then
+		log "$LOG_ERROR" "No shares found. Full config file contents:\n$(cat "$config_file")"
+		return 1
+	fi
+
+	log "$LOG_DEBUG" "Starting to process each share line"
+
+	# Process each share line
+	while read -r line; do
+		log "$LOG_DEBUG" "Processing line: '$line'"
+
+		# Extract share details
+		local share_name
+		share_name=$(echo "$line" | sed -E 's/SHARED_FOLDER_(.*)_PATH=.*/\1/')
+		local path
+		path=$(echo "$line" | cut -d'"' -f2)
+		local tag
+		tag=$(grep "SHARED_FOLDER_${share_name}_TAG=" "$config_file" | cut -d'"' -f2 || echo "default_tag")
+		local readonly
+		readonly=$(grep "SHARED_FOLDER_${share_name}_READONLY=" "$config_file" | cut -d'=' -f2 || echo "0")
+		local is_smb=0
+		[[ "$share_type" == "smb" ]] && is_smb=1
+
+		# Increment counter for each share processed
+		share_count=$((share_count + 1))
+
+		# Print share details
+		echo -e "\nShare:"
+		echo -e "Name                 : $share_name"
+		echo -e "Path                 : $path"
+		echo -e "Mount Tag            : $tag"
+		echo -e "Access               : $([[ "$readonly" == "1" ]] && echo "read-only" || echo "read-write")"
+
+		# Add type-specific information
+		if [[ $is_smb -eq 1 ]]; then
+			echo -e "Windows Access Path  : \\\\10.0.2.4\\$share_name"
+			if [[ -f "${CONFIG[VM_DIR]}/${name}/.smb_creds" ]]; then
+				echo -e "Credentials File    : ${CONFIG[VM_DIR]}/${name}/.smb_creds"
+			fi
+		else
+			echo -e "Linux Mount Command  : mount -t 9p -o trans=virtio $tag /mnt/point"
+		fi
+
+		echo -e "--------------------------------------------------"
+		log "$LOG_DEBUG" "Finished printing details for: $share_name"
+	done <<<"$shares"
+
+	log "$LOG_DEBUG" "End of loop. Total shares processed: $share_count"
+
+	# Final share count
+	echo -e "\nTotal Shares         : $share_count"
+
+	log "$LOG_DEBUG" "Final share count: $share_count"
+	return 0
+}
+
+#==============================================================================
+# 7. USB MANAGEMENT
+#==============================================================================
+
+# Store USB device state for persistence
+store_usb_device_state() {
+	local name=$1
+	local vendor_id=$2
+	local product_id=$3
+	local serial=${4:-""}
+	local state_file="${CONFIG[VM_DIR]}/${name}/.usb_devices"
+
+	# Create state directory if it doesn't exist
+	mkdir -p "$(dirname "$state_file")"
+	touch "$state_file"
+	chmod "$SECURE_PERMISSIONS" "$state_file"
+
+	# Add device to state file if not already present
+	if ! grep -q "^${vendor_id}:${product_id}" "$state_file"; then
+		echo "${vendor_id}:${product_id}${serial:+:$serial}" >>"$state_file"
+	fi
+}
+
+# Remove USB device state
+remove_usb_device_state() {
+	local name=$1
+	local vendor_id=$2
+	local product_id=$3
+	local state_file="${CONFIG[VM_DIR]}/${name}/.usb_devices"
+
+	if [[ -f "$state_file" ]]; then
+		sed -i "/^${vendor_id}:${product_id}/d" "$state_file"
+	fi
+}
+
+# Get device serial number if available
+get_device_serial() {
+	local vendor_id=$1
+	local product_id=$2
+
+	# Try to get serial number using lsusb
+	local serial
+	serial=$(lsusb -d "${vendor_id}:${product_id}" -v 2>/dev/null |
+		grep -i "iSerial.*" | awk '{print $3}' | head -n1)
+
+	# Return empty string if no serial found
+	echo "${serial:-""}"
+}
+
+# Enhanced function to detect only physical external USB ports
+get_physical_usb_ports() {
+	local -a ports=()
+
+	# First, let's identify external USB ports by checking port attributes
+	for usb_ctrl in /sys/bus/usb/devices/usb*; do
+		[[ ! -d "$usb_ctrl" ]] && continue
+
+		local bus_num=$(basename "$usb_ctrl" | tr -cd '0-9')
+		[[ -z "$bus_num" ]] && continue
+
+		# Look for ports with specific attributes that indicate external ports
+		for port_path in "$usb_ctrl/"*; do
+			[[ ! -d "$port_path" ]] && continue
+
+			# Skip if this is clearly an internal device (like built-in webcam)
+			if [[ -f "$port_path/product" ]]; then
+				local product=$(cat "$port_path/product" 2>/dev/null)
+				if [[ "$product" =~ (Camera|Webcam|Bluetooth|Internal|Hub) ]]; then
+					continue
+				fi
+			fi
+
+			# Check for removable attribute - external ports are typically removable
+			local removable=0
+			if [[ -f "$port_path/removable" ]]; then
+				removable=$(cat "$port_path/removable" 2>/dev/null)
+			fi
+
+			# Get port number if this looks like an external port
+			if [[ "$removable" == "1" ]] || [[ ! -f "$port_path/product" ]]; then
+				local port_num=""
+				if [[ -f "$port_path/port" ]]; then
+					port_num=$(cat "$port_path/port" 2>/dev/null)
+				elif [[ $(basename "$port_path") =~ ^[0-9]+[-][0-9]+$ ]]; then
+					port_num=$(basename "$port_path" | cut -d'-' -f2)
+				fi
+
+				if [[ -n "$port_num" ]]; then
+					echo "$bus_num:$port_num"
+				fi
+			fi
+		done
+	done | sort -u
+}
+
+list_usb_devices() {
+	local vm_name=$1
+
+	# Create temporary file for device mapping
+	local map_file
+	map_file=$(mktemp)
+	chmod 600 "$map_file"
+
+	echo
+	echo "Available USB Ports and Devices:"
+	echo "================================================"
+	printf "%-4s %-10s %-10s %-15s %s\n" \
+		"NUM" "VENDOR" "PRODUCT" "BUS:PORT" "DESCRIPTION"
+	echo "------------------------------------------------"
+
+	# Initialize variables and arrays
+	local device_num=1
+	declare -A occupied_ports=()
+	declare -A all_ports=()
+
+	# Get all physical external ports
+	while read -r port_key; do
+		all_ports["$port_key"]=1
+	done < <(get_physical_usb_ports)
+
+	# Array of known internal device vendors to filter out
+	local -a internal_vendors=(
+		"8087" # Intel Bluetooth
+		"04ca" # Lite-On (webcams)
+		"1d6b" # Linux Foundation
+		"0000" # Invalid
+		"0001" # Invalid
+	)
+
+	# Process connected devices
+	while IFS= read -r line; do
+		if [[ $line =~ Bus\ ([0-9]+)\ Device\ ([0-9]+):\ ID\ ([0-9a-f]+):([0-9a-f]+)\ (.*) ]]; then
+			local bus="${BASH_REMATCH[1]}"
+			local device="${BASH_REMATCH[2]}"
+			local vendor="${BASH_REMATCH[3]}"
+			local product="${BASH_REMATCH[4]}"
+			local description="${BASH_REMATCH[5]}"
+
+			# Skip internal devices
+			local skip=0
+			for internal_vendor in "${internal_vendors[@]}"; do
+				if [[ "$vendor" = "$internal_vendor" ]]; then
+					skip=1
+					break
+				fi
+			done
+
+			if [[ "$description" =~ (Camera|Hub|root|Root|Bluetooth|Internal) ]] || [ "$skip" -eq 1 ]; then
+				continue
+			fi
+
+			# Get port number using multiple methods
+			local port_num=""
+			local dev_path="/sys/bus/usb/devices/${bus}-${device}"
+
+			if [[ -L "$dev_path" ]]; then
+				local real_path=$(readlink -f "$dev_path")
+				if [[ -f "$real_path/port" ]]; then
+					port_num=$(cat "$real_path/port" 2>/dev/null)
+				elif [[ $real_path =~ /([0-9]+)-[0-9]+$ ]]; then
+					port_num="${BASH_REMATCH[1]}"
+				fi
+			fi
+
+			# Use device number as fallback
+			port_num=${port_num:-$device}
+			local port_key="$bus:$port_num"
+
+			# Save mapping and print device info
+			echo "${device_num}:${vendor}:${product}" >>"$map_file"
+			printf "%-4s %-10s %-10s %-15s %s\n" \
+				"[$device_num]" "$vendor" "$product" "$port_key" "$description"
+
+			occupied_ports["$port_key"]=1
+			((device_num++))
+		fi
+	done < <(lsusb)
+
+	# Print empty external ports
+	for port_key in $(printf '%s\n' "${!all_ports[@]}" | sort -t: -k1n -k2n); do
+		if [[ -z "${occupied_ports[$port_key]:-}" ]]; then
+			printf "%-4s %-10s %-10s %-15s %s\n" \
+				"[$device_num]" "-" "-" "$port_key" "<empty port>"
+			echo "${device_num}:-:-" >>"$map_file"
+			((device_num++))
+		fi
+	done
+
+	# Save mapping file
+	if ! mv "$map_file" "${CONFIG[VM_DIR]}/.usb_map" 2>/dev/null; then
+		log "$LOG_WARN" "Failed to save device mapping file"
+		rm -f "$map_file"
+	else
+		chmod 600 "${CONFIG[VM_DIR]}/.usb_map"
+	fi
+
+	# Print usage information if VM name provided
+	if [[ -n "$vm_name" ]]; then
+		echo
+		echo "Usage:"
+		echo "  Add USB device:    qemate usb $vm_name add NUMBER"
+		echo "  Add temporarily:   qemate usb $vm_name add NUMBER --temp"
+		echo "  Remove device:     qemate usb $vm_name remove NUMBER"
+	fi
+
+	return 0
+}
+
+query_usb_device() {
+	local device_num=$1
+	local map_file="${CONFIG[VM_DIR]}/.usb_map"
+
+	# Validate input
+	if ! [[ "$device_num" =~ ^[0-9]+$ ]]; then
+		log "$LOG_ERROR" "Invalid device number"
+		return 1
+	fi
+
+	# Check map file exists
+	if [ ! -f "$map_file" ]; then
+		log "$LOG_ERROR" "No USB device list found. Run 'usb list' first"
+		return 1
+	fi
+
+	# Get device ID
+	local device_id
+	device_id=$(sed -n "${device_num}p" "$map_file" | cut -d: -f2,3)
+	if [ -z "$device_id" ]; then
+		log "$LOG_ERROR" "Device number $device_num not found"
+		return 1
+	fi
+
+	# Get detailed device information
+	local vendor_id="${device_id%:*}"
+	local product_id="${device_id#*:}"
+
+	echo "USB Device Information:"
+	echo "======================="
+	echo "Device Number: $device_num"
+	echo "Vendor ID:     $vendor_id"
+	echo "Product ID:    $product_id"
+
+	# Get additional information from lsusb
+	if command -v lsusb >/dev/null 2>&1; then
+		echo
+		echo "Device Details:"
+		lsusb -d "$vendor_id:$product_id" -v 2>/dev/null |
+			grep -E "^  \w|^\s+\w" |
+			sed 's/^  */  /'
+	fi
+
+	return 0
+}
+
+# Add USB device to VM
+add_usb_device() {
+	local name=$1
+	local device_num=$2
+	local temp=${3:-0}
+	local map_file="${CONFIG[VM_DIR]}/.usb_map"
+	local config_file="${CONFIG[VM_DIR]}/${name}/config"
+
+	# Validate inputs
+	if ! validate_vm_name "$name" ||
+		! [[ "$device_num" =~ ^[0-9]+$ ]]; then
+		return 1
+	fi
+
+	# Check map file exists
+	if [[ ! -f "$map_file" ]]; then
+		log "$LOG_ERROR" "No USB device list found. Run 'usb list' first"
+		return 1
+	fi
+
+	# Get device ID
+	local device_id
+	device_id=$(sed -n "${device_num}p" "$map_file" | cut -d: -f2,3)
+	if [[ -z "$device_id" ]]; then
+		log "$LOG_ERROR" "Invalid device number: $device_num"
+		return 1
+	fi
+
+	local vendor_id="${device_id%:*}"
+	local product_id="${device_id#*:}"
+
+	if [[ "$temp" -eq 1 ]]; then
+		# Handle temporary connection
+		if ! check_vm_running "$name"; then
+			log "$LOG_ERROR" "VM must be running for temporary USB connection"
+			return 1
+		fi
+
+		# Use monitor socket
+		local monitor_socket="/tmp/qemu-monitor-${name}"
+		if ! echo "device_add usb-host,vendorid=0x${vendor_id},productid=0x${product_id}" |
+			socat - "UNIX-CONNECT:$monitor_socket" 2>/dev/null; then
+			log "$LOG_ERROR" "Failed to connect USB device"
+			return 1
+		fi
+
+		log "$LOG_SUCCESS" "Temporarily connected USB device ${vendor_id}:${product_id}"
+	else
+		# Handle permanent configuration
+		if check_vm_running "$name"; then
+			log "$LOG_ERROR" "VM must be stopped for permanent USB configuration"
+			return 1
+		fi
+
+		# Check device limit
+		local current_devices
+		current_devices=$(grep -c "^USB_DEVICE_" "$config_file" || echo "0")
+		if ((current_devices >= CONFIG[MAX_USB_DEVICES])); then
+			log "$LOG_ERROR" "Maximum number of USB devices reached"
+			return 1
+		fi
+
+		# Get device serial number for more reliable identification
+		local serial
+		serial=$(get_device_serial "$vendor_id" "$product_id")
+
+		# Store device state for persistence
+		store_usb_device_state "$name" "$vendor_id" "$product_id" "$serial"
+
+		# Create temporary config
+		local temp_config
+		temp_config=$(create_temp_file "config") || return 1
+
+		# Copy existing config
+		cp "$config_file" "$temp_config" || return 1
+
+		# Add USB configuration
+		if ! grep -q "^USB_DEVICES=" "$temp_config"; then
+			echo "USB_DEVICES=\"${vendor_id}:${product_id}${serial:+:$serial}\"" >>"$temp_config"
+		else
+			# Check for duplicate
+			if grep -q "${vendor_id}:${product_id}" "$temp_config"; then
+				log "$LOG_ERROR" "Device already configured"
+				return 1
+			fi
+			# Add to existing list
+			sed -i "/^USB_DEVICES=/ s/\"$/, ${vendor_id}:${product_id}${serial:+:$serial}\"/" "$temp_config"
+		fi
+
+		# Update config atomically
+		mv "$temp_config" "$config_file" || return 1
+		chmod "$SECURE_PERMISSIONS" "$config_file"
+
+		log "$LOG_SUCCESS" "Added USB device ${vendor_id}:${product_id} to configuration"
+		check_vm_running "$name" && log "$LOG_INFO" "Restart VM to apply changes"
+	fi
+
+	return 0
+}
+
+# Remove USB device from VM
+remove_usb_device() {
+	local name=$1
+	local device_num=$2
+	local map_file="${CONFIG[VM_DIR]}/.usb_map"
+	local config_file="${CONFIG[VM_DIR]}/${name}/config"
+
+	# Validate inputs
+	if ! validate_vm_name "$name" ||
+		! [[ "$device_num" =~ ^[0-9]+$ ]]; then
+		return 1
+	fi
+
+	# Check map file exists
+	if [[ ! -f "$map_file" ]]; then
+		log "$LOG_ERROR" "No USB device list found. Run 'usb list' first"
+		return 1
+	fi
+
+	# Get device ID
+	local device_id
+	device_id=$(sed -n "${device_num}p" "$map_file" | cut -d: -f2,3)
+	if [[ -z "$device_id" ]]; then
+		log "$LOG_ERROR" "Invalid device number: $device_num"
+		return 1
+	fi
+
+	local vendor_id="${device_id%:*}"
+	local product_id="${device_id#*:}"
+
+	# Handle running VM
+	if check_vm_running "$name"; then
+		local monitor_socket="/tmp/qemu-monitor-${name}"
+		local device_list
+		device_list=$(echo "info usb" | socat - "UNIX-CONNECT:$monitor_socket" 2>/dev/null)
+
+		if echo "$device_list" | grep -q "vendor=0x${vendor_id},product=0x${product_id}"; then
+			local qemu_id
+			qemu_id=$(echo "$device_list" | grep "vendor=0x${vendor_id}" | awk '{print $1}')
+
+			if ! echo "device_del $qemu_id" | socat - "UNIX-CONNECT:$monitor_socket" 2>/dev/null; then
+				log "$LOG_ERROR" "Failed to remove USB device"
+				return 1
+			fi
+			log "$LOG_SUCCESS" "Removed USB device from running VM"
+		fi
+	fi
+
+	# Remove from persistent configuration
+	remove_usb_device_state "$name" "$vendor_id" "$product_id"
+
+	# Remove from configuration file
+	if grep -q "${vendor_id}:${product_id}" "$config_file"; then
+		# Create temporary config
+		local temp_config
+		temp_config=$(create_temp_file "config") || return 1
+
+		# Copy existing config
+		cp "$config_file" "$temp_config" || return 1
+
+		# Remove device from configuration
+		sed -i "s/${vendor_id}:${product_id}[^,\"]*,\?//" "$temp_config"
+		sed -i '/^USB_DEVICES=""/d' "$temp_config"
+		sed -i 's/,"/"/g' "$temp_config"
+
+		# Update config atomically
+		mv "$temp_config" "$config_file" || return 1
+		chmod "$SECURE_PERMISSIONS" "$config_file"
+
+		log "$LOG_SUCCESS" "Removed USB device from configuration"
+	fi
+
+	return 0
+}
+
+# Function to reconnect persistent USB devices
+reconnect_usb_devices() {
+	local name=$1
+	local state_file="${CONFIG[VM_DIR]}/${name}/.usb_devices"
+	local monitor_socket="/tmp/qemu-monitor-${name}"
+
+	# Check if VM is running
+	if ! check_vm_running "$name"; then
+		return 0
+	fi
+
+	# Check if state file exists
+	if [[ ! -f "$state_file" ]]; then
+		return 0
+	fi
+
+	log "$LOG_INFO" "Reconnecting persistent USB devices..."
+
+	# Read each device and attempt to reconnect
+	while IFS=: read -r vendor_id product_id serial; do
+		[[ -z "$vendor_id" ]] && continue
+
+		# Check if device is present
+		if ! lsusb -d "${vendor_id}:${product_id}" >/dev/null 2>&1; then
+			log "$LOG_WARN" "USB device ${vendor_id}:${product_id} not found"
+			continue
+		fi
+
+		# Attempt to connect the device
+		local connect_cmd="device_add usb-host,vendorid=0x${vendor_id},productid=0x${product_id}"
+		[[ -n "$serial" ]] && connect_cmd+=",serial=$serial"
+
+		if ! echo "$connect_cmd" | socat - "UNIX-CONNECT:$monitor_socket" 2>/dev/null; then
+			log "$LOG_ERROR" "Failed to reconnect USB device ${vendor_id}:${product_id}"
+			continue
+		fi
+
+		log "$LOG_SUCCESS" "Reconnected USB device ${vendor_id}:${product_id}"
+	done <"$state_file"
+}
+
+#==============================================================================
+# 8. MAIN PROGRAM EXECUTION
+#==============================================================================
+
+# Display help information
+show_help() {
+	cat <<EOF
+Qemate ${SCRIPT_VERSION} - QEMU Virtual Machine Manager
+====================================================
+
+A streamlined command-line tool for managing QEMU virtual machines.
+
+Basic Usage:
+    qemate COMMAND SUBCOMMAND [OPTIONS]
+    qemate COMMAND help (show detailed help for a command)
+
+Commands:
+  VM Management:
+    vm create NAME              Create a new virtual machine
+    vm start NAME               Start a virtual machine
+    vm stop NAME                Stop a running virtual machine
+    vm remove NAME              Delete a virtual machine
+    vm list                     Show all VMs and their status
+    vm status NAME              Show detailed VM information
+
+  Network Configuration:
+    net set NAME                Configure network type (nat/bridge/none)
+    net bridge setup            Create and configure network bridge
+    net bridge attach           Attach interface to bridge
+    net bridge dhcp             Configure DHCP for bridge
+    net bridge list             List configured bridges
+    net bridge cleanup          Remove bridge and configuration
+    net port add NAME           Add port forwarding rule
+    net port remove NAME        Remove port forwarding
+    net port list NAME          Show port forwarding rules
+
+  Shared Folders:
+    shared add NAME             Add a new shared folder (Linux/Windows)
+    shared remove NAME          Remove a shared folder
+    shared list NAME            Show configured shares
+
+  USB Devices:
+    usb add NAME                Add a USB device to VM
+    usb remove NAME             Remove a USB device
+    usb list [NAME]             List available USB devices
+    usb query NUMBER            Show detailed device information
+
+Use 'qemate COMMAND help' for detailed information about specific commands.
+EOF
+}
+
+# Show detailed help for VM management commands
+# VM-specific help with network options
+show_vm_help() {
+	cat <<EOF
+VM Management Commands
+====================
+
+CREATE
+    qemate vm create NAME [OPTIONS]
+    
+    Create a new virtual machine.
+    
+    Options:
+        --memory MB     RAM in megabytes (default: ${CONFIG[DEFAULT_MEMORY]})
+        --cores N       Number of CPU cores (default: ${CONFIG[DEFAULT_CORES]})
+        --disk SIZE    Disk size with suffix M/G/T (default: ${CONFIG[DEFAULT_DISK_SIZE]})
+    
+    Example:
+        qemate vm create ubuntu-server --memory 4096 --cores 4 --disk 40G
+
+START
+    qemate vm start NAME [OPTIONS]
+    
+    Start a virtual machine.
+    
+    Options:
+        --iso PATH     Boot from ISO file
+        --headless     Start without graphical display
+    
+    Example:
+        qemate vm start ubuntu-server --iso ubuntu.iso
+        qemate vm start ubuntu-server --headless
+
+STOP
+    qemate vm stop NAME [OPTIONS]
+    
+    Stop a running virtual machine.
+    
+    Options:
+        --force       Force stop without graceful shutdown
+    
+    Example:
+        qemate vm stop ubuntu-server
+        qemate vm stop ubuntu-server --force
+
+REMOVE
+    qemate vm remove NAME [OPTIONS]
+    
+    Delete a virtual machine and all associated files.
+    
+    Options:
+        --force     Skip confirmation prompt
+    
+    Example:
+        qemate vm remove ubuntu-server --force
+
+LIST
+    qemate vm list
+    
+    Show all virtual machines and their status.
+    
+    Example:
+        qemate vm list
+
+STATUS
+    qemate vm status NAME
+    
+    Show detailed information about a specific VM.
+    
+    Example:
+        qemate vm status ubuntu-server
+EOF
+}
+
+# Show detailed help for network management commands
+show_network_help() {
+	cat <<EOF
+Network Management Commands
+=========================
+
+NETWORK TYPE CONFIGURATION
+    qemate net set NAME --type TYPE
+    
+    Configure network type for a VM.
+    
+    Options:
+        --type TYPE     Network type (nat|bridge|none)
+    
+    Example:
+        qemate net set ubuntu-server --type nat
+
+PORT FORWARDING (NAT mode only)
+    qemate net port add NAME --host PORT --guest PORT [--proto PROTO]
+    qemate net port remove NAME --port PORT [--proto PROTO]
+    qemate net port list NAME
+
+    Manage port forwarding rules for NAT networking.
+    
+    Options for 'add':
+        --host PORT    Host port number (1-65535)
+        --guest PORT   Guest port number (1-65535)
+        --proto PROTO  Protocol (tcp|udp, default: tcp)
+    
+    Options for 'remove':
+        --port PORT    Port number to remove
+        --proto PROTO  Protocol (tcp|udp, default: tcp)
+    
+    Examples:
+        qemate net port add ubuntu-server --host 8080 --guest 80
+        qemate net port remove ubuntu-server --port 8080
+        qemate net port list ubuntu-server
+
+BRIDGE MANAGEMENT
+    qemate net bridge COMMAND [OPTIONS]
+    
+    Manage network bridges for VM connectivity.
+
+    Commands:
+        setup     Create and configure a new bridge
+        attach    Attach physical interface to bridge
+        list      Show configured bridges
+        dhcp      Configure DHCP server for bridge
+        cleanup   Remove bridge and cleanup configuration
+
+    setup options:
+        --name NAME     Bridge interface name
+        --ip ADDR      Bridge IP address
+        --netmask MASK Network mask (default: 255.255.255.0)
+
+    attach options:
+        --name NAME     Bridge interface name
+        --interface IF  Physical interface to attach
+
+    dhcp options:
+        --name NAME     Bridge interface name
+        --start ADDR    DHCP range start address
+        --end ADDR      DHCP range end address
+        --lease TIME    Lease time (default: 12h)
+
+    cleanup options:
+        --name NAME     Bridge interface name
+
+    Examples:
+        qemate net bridge setup --name br0 --ip 192.168.1.1
+        qemate net bridge attach --name br0 --interface eth0
+        qemate net bridge list
+        qemate net bridge dhcp --name br0 --start 192.168.1.100 --end 192.168.1.200
+        qemate net bridge cleanup --name br0
+
+NOTES:
+    Network Types:
+        nat     - Network Address Translation with port forwarding support
+        bridge  - Direct network access via bridge interface
+        none    - No network connectivity
+
+    Bridge Requirements:
+        - Root privileges
+        - bridge-utils package
+        - Kernel modules: bridge, tun, vhost_net
+        - QEMU bridge helper configured
+
+    Port Forwarding:
+        - Only available in NAT mode
+        - VM must be stopped to modify port forwards
+        - Host ports must be available
+        - Maximum of ${CONFIG[MAX_PORTS_PER_VM]} port forwards per VM
+EOF
+}
+
+# Show detailed help for shared folder commands
+show_shared_help() {
+	cat <<EOF
+Shared Folder Management Commands
+===============================
+
+ADD SHARED FOLDER
+    qemate shared add NAME [OPTIONS]
+    
+    Add a new shared folder to a VM.
+    
+    Options:
+        --path PATH      Host path to share
+        --name NAME      Share name identifier
+        --type TYPE      Share type (linux|windows)
+        --readonly       Make share read-only
+        --uid UID        User ID for Linux shares (default: 0)
+        --gid GID        Group ID for Linux shares (default: 0)
+    
+    Examples:
+        qemate shared add myvm --path /data --name shared --type linux
+        qemate shared add myvm --path /data --name shared --type windows --readonly
+
+REMOVE SHARED FOLDER
+    qemate shared remove NAME --name SHARE_NAME
+    
+    Remove a shared folder configuration.
+    
+    Example:
+        qemate shared remove myvm --name shared
+
+LIST SHARED FOLDERS
+    qemate shared list NAME
+    
+    Show all configured shared folders for a VM.
+    
+    Example:
+        qemate shared list myvm
+
+NOTES:
+    Linux Shares (virtio-9p):
+        - Maximum of ${CONFIG[MAX_SHARES_PER_VM]} shares per VM
+        - Supports read-write and read-only modes
+        - Custom UID/GID mapping available
+        - VM must be stopped to modify configuration
+
+    Windows Shares (SMB):
+        - Requires Samba server (smbd) installed and running
+        - QEMU guest agent required on Windows VMs
+        - Secure credential management
+        - VM must be stopped to modify configuration
+        - Share accessed as \\\\10.0.2.4\\sharename
+
+    General:
+        - Shared folders are persistent across VM reboots
+        - Path must exist and be accessible
+        - Share names must be unique within a VM
+        - Share paths have secure permissions enforced
+EOF
+}
+
+# Show detailed help for USB device commands
+show_usb_help() {
+	cat <<EOF
+USB Device Management Commands
+============================
+
+LIST USB DEVICES
+    qemate usb list [NAME]
+    
+    List all available USB devices and empty ports.
+    If VM name is provided, shows command usage examples.
+    
+    Example:
+        qemate usb list
+        qemate usb list ubuntu-vm
+
+ADD USB DEVICE
+    qemate usb add NAME NUMBER [OPTIONS]
+    
+    Add a USB device to a VM.
+    
+    Options:
+        --temp      Make connection temporary (hot-plug)
+    
+    Examples:
+        qemate usb add ubuntu-vm 1
+        qemate usb add ubuntu-vm 2 --temp
+
+REMOVE USB DEVICE
+    qemate usb remove NAME NUMBER
+    
+    Remove a USB device from a VM.
+    
+    Example:
+        qemate usb remove ubuntu-vm 1
+
+QUERY USB DEVICE
+    qemate usb query NUMBER
+    
+    Show detailed information about a USB device.
+    
+    Example:
+        qemate usb query 1
+
+NOTES:
+    Device Limits:
+        - Maximum of ${CONFIG[MAX_USB_DEVICES]} devices per VM
+        - Internal devices (webcams, bluetooth, etc.) are filtered out
+        - Only physical external USB ports are detected
+
+    Permanent Attachment:
+        - VM must be stopped to configure
+        - Device automatically reconnects on VM start
+        - Configuration persists across reboots
+        - Device serial number tracked for reliable connection
+
+    Temporary Attachment:
+        - VM must be running to attach device
+        - Connection lost after VM shutdown
+        - No configuration changes
+        - Useful for one-time device access
+
+    General:
+        - Devices identified by vendor and product IDs
+        - Empty USB ports are detected and listed
+        - Hot-plug support for running VMs
+        - Secure device state storage
+EOF
+}
+
+# Main Command Parser
+main() {
+	local command=${1:-}
+
+	[[ -z "$command" ]] && {
+		show_help
+		exit 0
+	}
+
+	shift
+
+	case "$command" in
+	vm)
+		if [[ $# -eq 0 || "$1" == "help" ]]; then
+			show_vm_help
+			exit 0
+		fi
+		parse_vm_command "$@"
+		;;
+
+	net)
+		if [[ $# -eq 0 || "$1" == "help" ]]; then
+			show_network_help
+			exit 0
+		fi
+		parse_net_command "$@"
+		;;
+
+	shared)
+		if [[ $# -eq 0 || "$1" == "help" ]]; then
+			show_shared_help
+			exit 0
+		fi
+		parse_shared_command "$@"
+		;;
+
+	usb)
+		if [[ $# -eq 0 || "$1" == "help" ]]; then
+			show_usb_help
+			exit 0
+		fi
+		parse_usb_command "$@"
+		;;
+
+	help)
+		parse_help_command "${2:-}"
+		;;
+	version)
+		echo "qemate version $SCRIPT_VERSION"
+		;;
+
+	*)
+		echo "Unknown command: $command"
+		show_help
+		exit 1
+		;;
+	esac
+}
+
+# Execute main only if script is run directly
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+	# Set up signal traps
+	trap 'interrupt_handler' INT TERM
+	trap 'error_handler ${LINENO} $?' ERR
+	trap 'cleanup_handler' EXIT
+
+	# Execute main with all arguments
+	main "$@"
+fi
