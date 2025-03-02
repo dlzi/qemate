@@ -15,15 +15,14 @@ Qemate is a robust command-line tool for managing QEMU virtual machines. It prov
   - Secure VM removal with cleanup
 
 - **Advanced Networking**:
-  - Multiple networking modes (NAT, bridge, none)
+  - Multiple networking modes (NAT, none)
   - Comprehensive port forwarding management
-  - Bridge networking with DHCP support
   - Network interface configuration
   - Automatic network validation
 
 - **Shared Storage Solutions**:
   - Linux sharing via virtio-9p
-  - Windows sharing via SMB
+  - Windows sharing via QEMU's built-in SMB
   - Secure credential management
   - Flexible access control (read-only/read-write)
   - Custom UID/GID mapping for Linux shares
@@ -56,13 +55,7 @@ Qemate is a robust command-line tool for managing QEMU virtual machines. It prov
   - Linux kernel with KVM support
   - Root access for privileged operations
 
-- **Networking Requirements**:
-  - bridge-utils package for bridge networking
-  - Kernel modules: bridge, tun, vhost_net
-  - Properly configured QEMU bridge helper
-
 - **Shared Storage Requirements**:
-  - Samba server for Windows shares
   - QEMU guest agent for Windows VMs
   - Appropriate filesystem permissions
 
@@ -130,13 +123,6 @@ qemate net set NAME --type TYPE
 qemate net port add NAME --host PORT --guest PORT [--proto PROTO]
 qemate net port remove NAME --port PORT [--proto PROTO]
 qemate net port list NAME
-
-# Bridge management
-qemate net bridge setup --name NAME --ip ADDR [--netmask MASK]
-qemate net bridge attach --name NAME --interface IF
-qemate net bridge dhcp --name NAME --start ADDR --end ADDR [--lease TIME]
-qemate net bridge list
-qemate net bridge cleanup --name NAME
 ```
 
 ### Shared Folder Management
@@ -163,7 +149,7 @@ qemate shared list NAME
 
 ```bash
 # List USB devices
-qemate usb list [NAME]
+qemate usb list
 
 # Add USB device
 qemate usb add NAME NUMBER [--temp]
