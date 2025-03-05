@@ -3,7 +3,26 @@
 [![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/dlzi/qemate)
 [![License](https://img.shields.io/badge/license-BSD--3--Clause-green.svg)](https://github.com/dlzi/qemate/blob/main/LICENSE)
 
-Qemate is a robust command-line tool for managing QEMU virtual machines. It provides an intuitive interface for creating and managing virtual machines with comprehensive support for networking, shared storage, and USB device passthrough. The tool features extensive error handling, secure file management, and intelligent resource optimization.
+Qemate is a robust command-line tool for managing QEMU virtual machines. It provides an intuitive interface for creating and managing virtual machines with comprehensive support for networking, shared storage, USB devices, and more.
+
+## Table of Contents
+- [Features](#features)
+- [Prerequisites](#prerequisites)
+- [Installation](#installation)
+- [Usage Guide](#usage-guide)
+  - [VM Management](#vm-management)
+  - [Network Configuration](#network-configuration)
+  - [Shared Folder Management](#shared-folder-management)
+  - [USB Device Management](#usb-device-management)
+- [Configuration](#configuration)
+- [Directory Structure](#directory-structure)
+- [Security Considerations](#security-considerations)
+- [Error Handling](#error-handling)
+- [Troubleshooting](#troubleshooting)
+- [Contributing](#contributing)
+- [License](#license)
+- [Author](#author)
+- [Support](#support)
 
 ## Features
 
@@ -171,6 +190,26 @@ VM configurations are stored in `${HOME}/.local/share/qemate/vms/NAME/config` wi
 - USB device assignments
 - Performance optimizations
 
+Example configuration file:
+```ini
+# VM Configuration
+# Created: 2025-03-05T14:17:03+00:00
+# Version: 1.0.0
+
+NAME="ubuntu-server"
+MEMORY=4096
+CORES=4
+DISK_SIZE="50G"
+NETWORK_TYPE="nat"
+MAC_ADDRESS="52:54:00:ab:cd:ef"
+SHARED_FOLDERS_ENABLED=1
+SHARED_FOLDER_TYPE="virtio-9p"
+SHARED_FOLDER_data_PATH="/data"
+SHARED_FOLDER_data_TAG="data"
+SHARED_FOLDER_data_READONLY=0
+USB_DEVICES="1234:abcd"
+```
+
 ## Directory Structure
 
 ```
@@ -199,6 +238,13 @@ The script provides comprehensive error management:
 - Resource locking for concurrent access
 - Proper exit code handling
 
+## Troubleshooting
+
+### Debugging Tips
+
+- Enable debug mode by setting `CONFIG[DEBUG]=1` in the script.
+- Review the logs in `${HOME}/.local/share/qemate/logs` for detailed information.
+
 ## Contributing
 
 Contributions are welcome! Please follow these steps:
@@ -226,3 +272,4 @@ For assistance:
 3. Create a new issue if needed
 
 Project Link: [https://github.com/dlzi/qemate](https://github.com/dlzi/qemate)
+
