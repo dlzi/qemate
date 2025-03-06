@@ -2410,13 +2410,13 @@ get_device_serial() {
 
 # Enhanced function to detect only physical external USB ports
 get_physical_usb_ports() {
-	local -a ports=()
-
 	# First, let's identify external USB ports by checking port attributes
 	for usb_ctrl in /sys/bus/usb/devices/usb*; do
 		[[ ! -d "$usb_ctrl" ]] && continue
 
-		local bus_num=$(basename "$usb_ctrl" | tr -cd '0-9')
+		local bus_num
+		bus_num=$(basename "$usb_ctrl" | tr -cd '0-9')
+
 		[[ -z "$bus_num" ]] && continue
 
 		# Look for ports with specific attributes that indicate external ports
@@ -2425,7 +2425,9 @@ get_physical_usb_ports() {
 
 			# Skip if this is clearly an internal device (like built-in webcam)
 			if [[ -f "$port_path/product" ]]; then
-				local product=$(cat "$port_path/product" 2>/dev/null)
+				local product
+				product=$(cat "$port_path/product" 2>/dev/null)
+
 				if [[ "$product" =~ (Camera|Webcam|Bluetooth|Internal|Hub) ]]; then
 					continue
 				fi
