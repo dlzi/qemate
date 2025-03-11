@@ -752,6 +752,12 @@ parse_net_command() {
 	local subcommand=$1
 	shift
 
+	if [[ -z "$subcommand" ]]; then
+		log "$LOG_ERROR" "Network subcommand is required"
+		echo "Usage: qemate net [set|port] ..."
+		return 1
+	fi
+
 	log "$LOG_DEBUG" "parse_net_command called with subcommand: $subcommand, args: $*"
 
 	case "$subcommand" in
@@ -798,6 +804,12 @@ parse_net_command() {
 			;;
 
 		port)
+			if [[ $# -lt 1 ]]; then
+				log "$LOG_ERROR" "Port subcommand is required"
+				echo "Usage: qemate net port [add|remove|list] ..."
+				return 1
+			fi
+
 			local subcmd=$1
 			shift
 			log "$LOG_DEBUG" "Processing port subcommand: $subcmd"
