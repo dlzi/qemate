@@ -1,0 +1,140 @@
+#!/bin/bash
+################################################################################
+# Qemate Bash Completion Script                                                #
+# Provides tab completion for Qemate commands, subcommands, and options        #
+################################################################################
+
+_qemate_completion() {
+    local cur prev words cword
+    _init_completion || return
+
+    # Qemate base directory for VMs
+    local VM_DIR="${HOME}/QVMs"
+
+    # Main commands
+    local commands="vm net help version"
+
+    # Subcommands
+    local vm_subcommands="create start stop status delete list wizard edit"
+    local net_subcommands="port set model"
+    local net_port_subcommands="list add remove"
+
+    # Options for various commands
+    local vm_create_opts="--memory --cores --disk-size --machine --iso"
+    local vm_start_opts="--iso --headless --extra-args"
+    local vm_stop_opts="--force"
+    local vm_delete_opts="--force"
+    local net_port_add_opts="--host --guest --proto"
+
+    # Helper function to get VM names
+    _get_vm_names() {
+        if [[ -d "$VM_DIR" ]]; then
+            find "$VM_DIR" -maxdepth 1 -type d -not -path "$VM_DIR" -exec basename {} \; 2>/dev/null
+        fi
+    }
+
+    # First level: Main commands
+    if [[ "$cword" -eq 1 ]]; then
+        COMPREPLY=($(compgen -W "$commands" -- "$cur"))
+        return
+    fi
+
+    # Second level: Subcommands and options
+    case "${words[1]}" in
+        vm)
+            if [[ "$cword" -eq 2 ]]; then
+                COMPREPLY=($(compgen -W "$vm_subcommands" -- "$cur"))
+            else
+                case "${words[2]}" in
+                    create)
+                        if [[ "$cword" -eq 3 ]]; then
+                            COMPREPLY=($(compgen -W "" -- "$cur"))  # VM name free text
+                        else
+                            COMPREPLY=($(compgen -W "$vm_create_opts" -- "$cur"))
+                            if [[ "$prev" == "--iso" ]]; then
+                                COMPREPLY=($(compgen -f -X '!*.iso' -- "$cur"))
+                            elif [[ "$prev" == "--machine" ]]; then
+                                COMPREPLY=($(compgen -W "q35 pc" -- "$cur"))
+                            fi
+                        fi
+                        ;;
+                    start)
+                        if [[ "$cword" -eq 3 ]]; then
+                            COMPREPLY=($(compgen -W "$(_get_vm_names)" -- "$cur"))
+                        else
+                            COMPREPLY=($(compgen -W "$vm_start_opts" -- "$cur"))
+                            if [[ "$prev" == "--iso" ]]; then
+                                COMPREPLY=($(compgen -f -X '!*.iso' -- "$cur"))
+                            fi
+                        fi
+                        ;;
+                    stop|status|delete|edit)
+                        if [[ "$cword" -eq 3 ]]; then
+                            COMPREPLY=($(compgen -W "$(_get_vm_names)" -- "$cur"))
+                        elif [[ "${words[2]}" == "stop" || "${words[2]}" == "delete" ]]; then
+                            COMPREPLY=($(compgen -W "$vm_stop_opts" -- "$cur"))
+                        fi
+                        ;;
+                    list|wizard)
+                        COMPREPLY=()
+                        ;;
+                esac
+            fi
+            ;;
+        net)
+            if [[ "$cword" -eq 2 ]]; then
+                COMPREPLY=($(compgen -W "$net_subcommands" -- "$cur"))
+            else
+                case "${words[2]}" in
+                    port)
+                        if [[ "$cword" -eq 3 ]]; then
+                            COMPREPLY=($(compgen -W "$net_port_subcommands" -- "$cur"))
+                        else
+                            case "${words[3]}" in
+                                list|remove)
+                                    if [[ "$cword" -eq 4 ]]; then
+                                        COMPREPLY=($(compgen -W "$(_get_vm_names)" -- "$cur"))
+                                    elif [[ "${words[3]}" == "remove" && "$cword" -eq 5 ]]; then
+                                        COMPREPLY=($(compgen -W "8080 80" -- "$cur"))  # Example ports
+                                    fi
+                                    ;;
+                                add)
+                                    if [[ "$cword" -eq 4 ]]; then
+                                        COMPREPLY=($(compgen -W "$(_get_vm_names)" -- "$cur"))
+                                    else
+                                        COMPREPLY=($(compgen -W "$net_port_add_opts" -- "$cur"))
+                                        if [[ "$prev" == "--proto" ]]; then
+                                            COMPREPLY=($(compgen -W "tcp udp" -- "$cur"))
+                                        fi
+                                    fi
+                                    ;;
+                            esac
+                        fi
+                        ;;
+                    set)
+                        if [[ "$cword" -eq 3 ]]; then
+                            COMPREPLY=($(compgen -W "$(_get_vm_names)" -- "$cur"))
+                        elif [[ "$cword" -eq 4 ]]; then
+                            COMPREPLY=($(compgen -W "nat user none" -- "$cur"))
+                        fi
+                        ;;
+                    model)
+                        if [[ "$cword" -eq 3 ]]; then
+                            COMPREPLY=($(compgen -W "$(_get_vm_names)" -- "$cur"))
+                        elif [[ "$cword" -eq 4 ]]; then
+                            COMPREPLY=($(compgen -W "e1000 virtio-net-pci" -- "$cur"))
+                        fi
+                        ;;
+                esac
+            fi
+            ;;
+        help|version)
+            COMPREPLY=()
+            ;;
+    esac
+
+    return 0
+}
+
+# Register the completion function
+complete -F _qemate_completion qemate

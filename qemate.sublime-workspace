@@ -1,0 +1,889 @@
+{
+	"auto_complete":
+	{
+		"selected_items":
+		[
+			[
+				"co",
+				"color"
+			],
+			[
+				"uk-padding-t",
+				"uk-padding-remove-bottom "
+			],
+			[
+				"uk-padding-to",
+				"uk-padding-remove-vertical "
+			],
+			[
+				"uk-pad",
+				"uk-padding-large "
+			],
+			[
+				"p",
+				"p"
+			],
+			[
+				"por",
+				"portfolioCategory"
+			],
+			[
+				"print",
+				"print_r()"
+			],
+			[
+				"uk-flex",
+				"uk-flex-center "
+			],
+			[
+				"end",
+				"endforeach"
+			],
+			[
+				"uk-ba",
+				"uk-background-muted "
+			],
+			[
+				"uk-se",
+				"uk-section-large "
+			],
+			[
+				"text-c",
+				"uk-text-center "
+			],
+			[
+				"flex",
+				"uk-flex-center "
+			],
+			[
+				"uk-con",
+				"uk-container-large "
+			],
+			[
+				"uk-w",
+				"uk-width-medium "
+			],
+			[
+				"uk-bac",
+				"uk-background-muted "
+			],
+			[
+				"uk-heig",
+				"uk-height-medium "
+			],
+			[
+				"uk-hei",
+				"uk-height-1-1 "
+			],
+			[
+				"bac",
+				"background-color"
+			],
+			[
+				"ftst",
+				"ftst--i \tBrevis Class"
+			],
+			[
+				"h",
+				"h--100p \tBrevis Class"
+			],
+			[
+				"bgp",
+				"bgpos--ctr \tBrevis Class"
+			],
+			[
+				"bgs",
+				"bgs--cr \tBrevis Class"
+			],
+			[
+				"bgc",
+				"bgc--rd1 \tBrevis Class"
+			],
+			[
+				"brcb",
+				"brc--bk1 \tBrevis Class"
+			],
+			[
+				"brrw",
+				"brrw--1 \tBrevis Class"
+			],
+			[
+				"ain",
+				"anis--ctr \tBrevis Class"
+			],
+			[
+				"h--50",
+				"h--50vh \tBrevis Class"
+			],
+			[
+				"d",
+				"d--fx \tBrevis Class"
+			],
+			[
+				"bxsw",
+				"bxsw--1 \tBrevis Class"
+			],
+			[
+				"h-",
+				"h--50p \tBrevis Class"
+			],
+			[
+				"mih",
+				"mih--100vh \tBrevis Class"
+			],
+			[
+				"d--blk",
+				"d--ieblk \tBrevis Class"
+			],
+			[
+				"vl",
+				"vlan--mid \tBrevis Class"
+			],
+			[
+				"bx",
+				"bxs--ctbx \tBrevis Class"
+			],
+			[
+				"bxs",
+				"bxs--brbx \tBrevis Class"
+			],
+			[
+				"w--1",
+				"w--100p \tBrevis Class"
+			],
+			[
+				"fxd",
+				"fxdn--col \tBrevis Class"
+			],
+			[
+				"fx",
+				"d--fx"
+			],
+			[
+				"ln",
+				"lnh--3 \tBrevis Class"
+			],
+			[
+				"fts",
+				"fts--3 \tBrevis Class"
+			],
+			[
+				"pl",
+				"pl--2 \tBrevis Class"
+			],
+			[
+				"c",
+				"c--gy8 \tBrevis Class"
+			],
+			[
+				"brc--g",
+				"brc--gy3 \tBrevis Class"
+			],
+			[
+				"brst",
+				"brst--sol \tBrevis Class"
+			],
+			[
+				"br-",
+				"brw--1 \tBrevis Class"
+			],
+			[
+				"ftf",
+				"ftfam--mosp \tBrevis Class"
+			],
+			[
+				"ftw",
+				"ftwt--7 \tBrevis Class"
+			],
+			[
+				"t",
+				"t--2 \tBrevis Class"
+			],
+			[
+				"ls",
+				"lsst--n \tBrevis Class"
+			],
+			[
+				"pos",
+				"pos--rel \tBrevis Class"
+			],
+			[
+				"cg",
+				"c--gy4 \tBrevis Class"
+			],
+			[
+				"txtd",
+				"txtdec--u \tBrevis Class"
+			],
+			[
+				"mb",
+				"mb--8 \tBrevis Class"
+			],
+			[
+				"py",
+				"py--2 \tBrevis Class"
+			],
+			[
+				"pt",
+				"pt--8 \tBrevis Class"
+			],
+			[
+				"mt--n",
+				"mt--n2 \tBrevis Class"
+			],
+			[
+				"bxsb",
+				"bxsw--b1 \tBrevis Class"
+			],
+			[
+				"brra",
+				"brrad--2 \tBrevis Class"
+			],
+			[
+				"c--g",
+				"c--gy7 \tBrevis Class"
+			],
+			[
+				"txt",
+				"txtan--l \tBrevis Class"
+			],
+			[
+				"lnh",
+				"lnh--2 \tBrevis Class"
+			],
+			[
+				"brbs",
+				"brbst--sol \tBrevis Class"
+			],
+			[
+				"brbc",
+				"brbc--gy8 \tBrevis Class"
+			],
+			[
+				"brbw",
+				"brbw--1 \tBrevis Class"
+			],
+			[
+				"txtdec",
+				"txtdechvr--u \tBrevis Class"
+			],
+			[
+				"c--b",
+				"c--bk1 \tBrevis Class"
+			],
+			[
+				"ani",
+				"anis--ctr \tBrevis Class"
+			],
+			[
+				"a",
+				"ansf--ctr \tBrevis Class"
+			],
+			[
+				"tx",
+				"txtan--l \tBrevis Class"
+			],
+			[
+				"cl",
+				"clr--bh \tBrevis Class"
+			],
+			[
+				"of",
+				"of--hid \tBrevis Class"
+			],
+			[
+				"miw",
+				"miw--5 \tBrevis Class"
+			],
+			[
+				"fxg",
+				"fxgw--1 \tBrevis Class"
+			],
+			[
+				"fxs",
+				"fxsk--1 \tBrevis Class"
+			],
+			[
+				"my",
+				"my--1 \tBrevis Class"
+			],
+			[
+				"fxw",
+				"fxwp--wp \tBrevis Class"
+			],
+			[
+				"d-",
+				"d--fx \tBrevis Class"
+			]
+		]
+	},
+	"buffers":
+	[
+	],
+	"build_system": "",
+	"build_system_choices":
+	[
+		[
+			[
+				[
+					"Packages/Rust Enhanced/RustEnhanced.sublime-build",
+					""
+				],
+				[
+					"Packages/Rust Enhanced/RustEnhanced.sublime-build",
+					"Automatic"
+				],
+				[
+					"Packages/Rust Enhanced/RustEnhanced.sublime-build",
+					"Run"
+				],
+				[
+					"Packages/Rust Enhanced/RustEnhanced.sublime-build",
+					"Run (with args)..."
+				],
+				[
+					"Packages/Rust Enhanced/RustEnhanced.sublime-build",
+					"Check"
+				],
+				[
+					"Packages/Rust Enhanced/RustEnhanced.sublime-build",
+					"Test"
+				],
+				[
+					"Packages/Rust Enhanced/RustEnhanced.sublime-build",
+					"Test (with args)..."
+				],
+				[
+					"Packages/Rust Enhanced/RustEnhanced.sublime-build",
+					"Bench"
+				],
+				[
+					"Packages/Rust Enhanced/RustEnhanced.sublime-build",
+					"Clean"
+				],
+				[
+					"Packages/Rust Enhanced/RustEnhanced.sublime-build",
+					"Document"
+				],
+				[
+					"Packages/Rust Enhanced/RustEnhanced.sublime-build",
+					"Clippy"
+				],
+				[
+					"Packages/Rust Enhanced/RustEnhanced.sublime-build",
+					"Script"
+				]
+			],
+			[
+				"Packages/Rust Enhanced/RustEnhanced.sublime-build",
+				"Run"
+			]
+		]
+	],
+	"build_varint": "",
+	"command_palette":
+	{
+		"height": 0.0,
+		"last_filter": "",
+		"selected_items":
+		[
+			[
+				"in",
+				"Package Control: Install Package"
+			],
+			[
+				"list",
+				"Package Control: List Packages"
+			],
+			[
+				"inst",
+				"Package Control: Install Package"
+			],
+			[
+				"pacakge",
+				"Package Control: List Packages"
+			],
+			[
+				"insta",
+				"Package Control: Install Package"
+			],
+			[
+				"install",
+				"Package Control: Install Package"
+			],
+			[
+				"ins",
+				"MarkdownTOC:Insert TOC"
+			],
+			[
+				"remov",
+				"Package Control: Remove Package"
+			],
+			[
+				"toc",
+				"MarkdownTOC:Insert TOC"
+			],
+			[
+				"swi",
+				"Profiles: Switch"
+			],
+			[
+				"remo",
+				"Package Control: Remove Package"
+			],
+			[
+				"lis",
+				"Package Control: List Packages"
+			],
+			[
+				"prof",
+				"Profiles: Toggle Last Used"
+			],
+			[
+				"pro",
+				"Profiles: Switch"
+			],
+			[
+				"mar",
+				"Markdown Preview: Preview in Browser"
+			],
+			[
+				"mark",
+				"Markdown Preview: Preview in Browser"
+			],
+			[
+				"insl",
+				"Package Control: Install Package"
+			],
+			[
+				"remove",
+				"Package Control: Remove Package"
+			],
+			[
+				"rem",
+				"Package Control: Remove Package"
+			]
+		],
+		"width": 0.0
+	},
+	"console":
+	{
+		"height": 175.0,
+		"history":
+		[
+		]
+	},
+	"distraction_free":
+	{
+		"menu_visible": true,
+		"show_minimap": false,
+		"show_open_files": false,
+		"show_tabs": false,
+		"side_bar_visible": false,
+		"status_bar_visible": false
+	},
+	"expanded_folders":
+	[
+		"/home/daniel/Public/qemate",
+		"/home/daniel/Public/qemate/completion",
+		"/home/daniel/Public/qemate/completion/bash",
+		"/home/daniel/Public/qemate/docs",
+		"/home/daniel/Public/qemate/docs/man",
+		"/home/daniel/Public/qemate/src",
+		"/home/daniel/Public/qemate/src/lib",
+		"/home/daniel/Public/qemate/tests"
+	],
+	"file_history":
+	[
+		"/home/daniel/Public/qemate/completion/bash/qemate",
+		"/home/daniel/Public/qemate/docs/man/qemate.1",
+		"/home/daniel/Public/qemate/uninstall.sh",
+		"/home/daniel/Public/qemate/PKGBUILD",
+		"/home/daniel/Public/qemate/src/lib/qemate_net.sh",
+		"/home/daniel/Public/qemate/src/lib/qemate_vm.sh",
+		"/home/daniel/Public/qemate/src/lib/qemate_utils.sh",
+		"/home/daniel/Public/qemate/src/qemate.sh",
+		"/home/daniel/Public/qemate/install.sh",
+		"/home/daniel/Public/qemate copy/src/lib/qemate_vm.sh",
+		"/home/daniel/Public/qemate copy/src/qemate.sh",
+		"/home/daniel/Public/qemate copy (1)/src/lib/qemate_utils.sh",
+		"/home/daniel/Public/qemate/tests/qemate_tests.bats",
+		"/home/daniel/Public/qemate copy/src/lib/qemate_utils.sh",
+		"/home/daniel/Public/qemate/README.md",
+		"/home/daniel/Public/qemate/CHANGELOG.md",
+		"/home/daniel/Public/qemate/output_1.txt",
+		"/home/daniel/Public/qemate/src/lib/qemate_usb.sh",
+		"/home/daniel/QVMs/logs/WIN_20250401_222917.log",
+		"/home/daniel/QVMs/logs/WIN_20250401_222824.log",
+		"/home/daniel/QVMs/logs/qemate.log",
+		"/home/daniel/Public/vmate/src/lib/vmate_vm.sh",
+		"/home/daniel/Public/vmate/src/vmate.sh",
+		"/home/daniel/Public/vmate/completion/bash/vmate",
+		"/home/daniel/Public/vmate/uninstall.sh",
+		"/home/daniel/Public/vmate/install.sh",
+		"/home/daniel/Public/vmate/docs/man/qemate.1",
+		"/home/daniel/Public/vmate/src/lib/vmate_usb.sh",
+		"/home/daniel/Public/vmate/src/lib/vmate_shared.sh",
+		"/home/daniel/Public/vmate/src/lib/vmate_net.sh",
+		"/home/daniel/Public/vmate/src/lib/vmate_utils.sh",
+		"/home/daniel/Public/vmate/tests/vmate_tests.bats",
+		"/home/daniel/Public/qemate/src/lib/qemate_shared.sh",
+		"/home/daniel/Downloads/qemate_usb_fixed.sh",
+		"/home/daniel/.local/share/qemate/vms/WIN/config",
+		"/home/daniel/Public/qemate/VERSION",
+		"/home/daniel/Public/qemate/Makefile",
+		"/home/daniel/Public/qemate/tests/run_tests.sh",
+		"/home/daniel/Public/qemate/config/default.conf",
+		"/home/daniel/Public/qemate/src/lib/qemate_config.sh",
+		"/home/daniel/Public/qemate/src/output.txt",
+		"/home/daniel/Public/qemate/src/generate-manifest.sh",
+		"/home/daniel/Public/qemate/src/trace.log",
+		"/home/daniel/Public/AI-Repo-Packer/ai-repo-packer.sh",
+		"/home/daniel/Downloads/style.css",
+		"/home/daniel/Downloads/newspaper-uikit-html.html",
+		"/home/daniel/Downloads/newspaper-style-design/dist/style.css",
+		"/home/daniel/Public/qemate-old/src/qemate.sh",
+		"/home/daniel/Public/qemate-old/src/qemate_utils.sh",
+		"/home/daniel/Public/qemate-old/src/config.sh",
+		"/home/daniel/Public/qemate/LICENSE",
+		"/home/daniel/Public/qemate/src/config.sh",
+		"/home/daniel/Public/qemate/src/qemate_utils.sh",
+		"/home/daniel/Public/qemate/src/qemate_vm.sh",
+		"/home/daniel/Public/qemate/src/qemate_core.sh",
+		"/home/daniel/Downloads/work",
+		"/home/daniel/Downloads/Suporte Fluxo.txt",
+		"/home/daniel/Public/qemate/qemate.sh",
+		"/home/daniel/Downloads/plano-negocios-finorae-completo.md",
+		"/home/daniel/Public/qemate/qemate-v2.sh",
+		"/home/daniel/Public/qemate/qemate-v3.sh",
+		"/home/daniel/Downloads/[Portuguese (Brazil)] Unlocking the Old Testament Part 1 - Overview of the Old Testament [DownSub.com].txt",
+		"/home/daniel/Downloads/cleaned_transcript.txt",
+		"/home/daniel/Downloads/Unlocking the Old Testament Part 1 - Overview of the Old Testament [3y7nN4TVX5Y].pt.vtt",
+		"/home/daniel/Public/WWW/pw.test/site/config.php",
+		"/home/daniel/Public/WWW/onepage.test/site/config.php",
+		"/home/daniel/Public/WWW/butikk.test/site/config.php",
+		"/tmp/rsub-57dupz/pw.conf",
+		"/home/daniel/Public/qemate/qemate.bak",
+		"/home/daniel/Downloads/Spire_90s_Dance_Essentials/Spire_90s_Dance_Essentials/Sample Pack/13 Faithless 130 BPM/Info.rtf",
+		"/home/daniel/.bashrc",
+		"/home/daniel/.local/share/qemate/vms/LAMP/config",
+		"/home/daniel/Downloads/plano-negocios-finorae.md",
+		"/home/daniel/Downloads/Backup-codes-finoraebellatovaglia.txt",
+		"/home/daniel/Downloads/seopowersuite/install.sh",
+		"/home/daniel/Downloads/plano-negocios-finorae-resumido.md",
+		"/home/daniel/Downloads/finorae-business-plan.md",
+		"/home/daniel/Downloads/vectorink-vectorizer-result.svg",
+		"/home/daniel/Downloads/finorae-business-plan-updated.md",
+		"/home/daniel/Downloads/luxury-linens-business-plan.md",
+		"/home/daniel/Downloads/luxo.md",
+		"/home/daniel/Downloads/luxo",
+		"/home/daniel/Downloads/luxury-linens-business-plan-portuguese(1).md",
+		"/home/daniel/Downloads/luxury-linens-business-plan-additions.md",
+		"/home/daniel/Applications/MuLab/User/LogFiles/Log-20250301-164328.txt",
+		"/home/daniel/Public/qemate/readme2.md",
+		"/home/daniel/Public/qemate/readme.md",
+		"/home/daniel/Downloads/user.js",
+		"/home/daniel/Downloads/chapter 3 - prompt-types-structures.md",
+		"/home/daniel/Downloads/chapter-3-prompt-types-structures.md",
+		"/home/daniel/Downloads/chapter-3-introduction.md",
+		"/home/daniel/Downloads/exploratory-prompts.md",
+		"/home/daniel/Downloads/task-oriented-prompts.md",
+		"/home/daniel/Downloads/multi-step-dynamic-prompts.md",
+		"/home/daniel/Downloads/foundations-of-prompt-engineering-revised.md",
+		"/home/daniel/Public/qemate/untitled.sh",
+		"/home/daniel/Public/brevis/brevis-v3.css",
+		"/home/daniel/Public/qemate/qemate",
+		"/home/daniel/Downloads/updated-progression-system.md",
+		"/home/daniel/Downloads/updated-comparison-chart.md",
+		"/home/daniel/Downloads/self-defense-systems-comparison.md",
+		"/usr/local/bin/ai-repo-packer",
+		"/home/daniel/Public/qemate/teste.sh",
+		"/home/daniel/Downloads/morrodosanjos.com.br.txt",
+		"/home/daniel/Downloads/FMTS_AMBIENT_SYNTHWAVE_V1/FMTS_AMBIENT_SYNTHWAVE_V1/Ambient_Synthwave_Track_01_Cm/Chords.txt",
+		"/home/daniel/Downloads/FMTS_EMOTIONAL_TRANCE_PADS_N_ARPS_V2/FMTS_EMOTIONAL_TRANCE_PADS_N_ARPS_V2/Emotional_Trance_Pads_n_Arps_Track_01_Cm/Chords.txt",
+		"/home/daniel/Downloads/alp-checklist.php",
+		"/home/daniel/.qemate_autocomplete",
+		"/home/daniel/Downloads/.qemate_completions",
+		"/home/daniel/Downloads/git-token.txt",
+		"/usr/local/bin/qemate",
+		"/home/daniel/Public/WWW/icon.php",
+		"/home/daniel/Public/WWW/onepage.test/wire/modules/Inputfield/InputfieldIcon/icons.inc",
+		"/home/daniel/Public/WWW/onepage.test/wire/modules/Inputfield/InputfieldIcon/icons.inc copy",
+		"/home/daniel/Public/qemate/qemate-v4.sh",
+		"/home/daniel/Public/qemate/ai_friendly_repo_pack.txt",
+		"/home/daniel/.local/share/qemate/vms/test/config",
+		"/home/daniel/Public/WWW/onepage.test/site/modules/ContactForm/ContactFormAdmin.module.php",
+		"/home/daniel/Public/WWW/onepage.test/site/modules/ContactForm/ContactForm.module.php",
+		"/home/daniel/Public/WWW/onepage.test/site/modules/ContactForm/ContactFormProcessor.php",
+		"/home/daniel/Public/WWW/onepage.test/site/modules/ContactForm/ai_friendly_repo_pack.txt",
+		"/home/daniel/Public/ContactForm copy (1)/ContactFormAdmin.module.php",
+		"/home/daniel/Public/ContactForm copy (1)/ContactForm.module.php",
+		"/home/daniel/Public/ContactForm copy (1)/ContactFormProcessor.php",
+		"/home/daniel/Public/ContactForm/ContactFormProcessor.php",
+		"/home/daniel/Public/ContactForm/ContactForm.module.php",
+		"/home/daniel/Public/WWW/onepage.test/site/modules/ContactForm/LICENSE",
+		"/home/daniel/Public/WWW/onepage.test/site/modules/ContactForm/.editorconfig"
+	],
+	"find":
+	{
+		"height": 26.0
+	},
+	"find_in_files":
+	{
+		"height": 505.0,
+		"where_history":
+		[
+		]
+	},
+	"find_state":
+	{
+		"case_sensitive": false,
+		"find_history":
+		[
+			"with_config_file",
+			"verbose",
+			"acpi",
+			"ENABLE_IO_THREADS",
+			"ENABLE_ACPI",
+			"disk0",
+			"QEMU_BIN",
+			"ENABLE_IO_THREADS",
+			"DISK_CACHE",
+			"log_message",
+			"QEMU_ARGS",
+			"validate_vm_identifier",
+			"validate_arguments",
+			"function_exit",
+			"    function_exit\n",
+			"function_exit",
+			"            function_exit\n",
+			"validate_vm_common_arguments",
+			"function_exit",
+			"function_enter",
+			"vm_wizard",
+			"interactive",
+			"interactive_mode",
+			"generate_mac_address",
+			"VM_DIR",
+			"--version",
+			"--v",
+			"--help",
+			"show_version",
+			"model\" \"m",
+			"--help",
+			"usb",
+			"restore_all_usb_permissions",
+			"            reconnect_usb_devices \"$vm_name\"\n",
+			"usb",
+			"adjust_usb_permissions",
+			"log_file",
+			"share_args",
+			"TEMP_DIR",
+			"qemate_utils.sh",
+			"check_system_requirements",
+			"set -x",
+			"usb",
+			"sed -i 's/,,/,/g; s/^USB_DEVICES=\"\"/d' \"$temp_config\"",
+			"usb_list_vm",
+			"usb_query",
+			"store_usb_device_state",
+			"vm_name",
+			"usb_args",
+			"net_args",
+			"DEFAULT_NETWORK_TYPE",
+			"mac_address",
+			"machine_type",
+			"mac",
+			"aio=native,cache=writeback",
+			"TEMP_DIR",
+			"LOG_DIR",
+			"VM_DIR",
+			"HOME",
+			"QEMATE_TEST_MODE",
+			"USER_CONF",
+			"validate_directories",
+			"VM_DIR",
+			"readonly",
+			"build_share_args",
+			"SHARE_NAME",
+			"show_share_help",
+			"share",
+			"share_add",
+			"build_share_args",
+			"vm_name",
+			"qemate net port ",
+			"port ",
+			"port_list",
+			"type_set",
+			"port_list",
+			"MAX_PORTS_PER_VM",
+			"cleanup_network",
+			"mac_address",
+			"mac_ad",
+			"mac",
+			"is_valid_usb_id",
+			"is_valid_cidr",
+			"get_file_size",
+			"calculate_hash",
+			"get_file_size",
+			"calculate_hash",
+			"update_config_cache",
+			"check_config_cache",
+			"manifest",
+			"DEBUG",
+			"is_valid_usb_id",
+			"get_file_size",
+			"calculate_hash",
+			"is_valid_ip",
+			"update_config_cache",
+			"check_config_cache",
+			"command_exists",
+			"secure_remove",
+			"secure_get",
+			"normalize_log_level",
+			"should_log",
+			"QEMATE_LIB_DIR",
+			"File:",
+			"if [[ -z \"${LOG_LEVELS[$level]+x}\" ]]; then",
+			"if [ $# -lt 1 ] || [ -z \"${1-}\" ]]; then",
+			"log",
+			"log \"$LOG_WARN\"",
+			"log",
+			"log \"$LOG_ERROR\"",
+			"log",
+			"log \"$LOG_WARN\"",
+			"log \"$LOG_SUCCESS\"",
+			"log \"$LOG_DEBUG\"",
+			"log \"$LOG_INFO\"",
+			"validate_arguments",
+			"log_message",
+			"log_message \"info\"",
+			"log_message",
+			"log_message \"error\"",
+			"log_message \"debug\"",
+			"log_message \"warning\"",
+			"log_message \"error\"",
+			"log_message",
+			"LOG_ERROR",
+			"--deb",
+			"LOG_LEVEL",
+			"log_info"
+		],
+		"highlight": true,
+		"in_selection": false,
+		"preserve_case": false,
+		"regex": false,
+		"replace_history":
+		[
+		],
+		"reverse": false,
+		"scrollbar_highlights": true,
+		"show_context": true,
+		"use_buffer2": true,
+		"use_gitignore": true,
+		"whole_word": false,
+		"wrap": false
+	},
+	"groups":
+	[
+		{
+			"sheets":
+			[
+			]
+		}
+	],
+	"incremental_find":
+	{
+		"height": 26.0
+	},
+	"input":
+	{
+		"height": 171.0
+	},
+	"layout":
+	{
+		"cells":
+		[
+			[
+				0,
+				0,
+				1,
+				1
+			]
+		],
+		"cols":
+		[
+			0.0,
+			1.0
+		],
+		"rows":
+		[
+			0.0,
+			1.0
+		]
+	},
+	"menu_visible": true,
+	"output.SublimeLinter":
+	{
+		"height": 0.0
+	},
+	"output.exec":
+	{
+		"height": 120.0
+	},
+	"output.find_results":
+	{
+		"height": 0.0
+	},
+	"pinned_build_system": "Packages/ShellScript/ShellScript.sublime-build",
+	"project": "qemate.sublime-project",
+	"replace":
+	{
+		"height": 48.0
+	},
+	"save_all_on_build": true,
+	"select_file":
+	{
+		"height": 0.0,
+		"last_filter": "",
+		"selected_items":
+		[
+		],
+		"width": 0.0
+	},
+	"select_project":
+	{
+		"height": 500.0,
+		"last_filter": "",
+		"selected_items":
+		[
+			[
+				"",
+				"~/Public/brevis/brevis.sublime-project"
+			]
+		],
+		"width": 380.0
+	},
+	"select_symbol":
+	{
+		"height": 64.0,
+		"last_filter": "",
+		"selected_items":
+		[
+		],
+		"width": 592.0
+	},
+	"selected_group": 0,
+	"settings":
+	{
+	},
+	"show_minimap": false,
+	"show_open_files": true,
+	"show_tabs": true,
+	"side_bar_visible": true,
+	"side_bar_width": 266.0,
+	"status_bar_visible": true,
+	"template_settings":
+	{
+	}
+}

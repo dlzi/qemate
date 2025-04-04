@@ -1,0 +1,3072 @@
+================
+File: ./docs/man/qemate.1
+Tokens: 612
+================
+.TH QEMATE 1 "March 31, 2025" "Qemate 1.1.0" "User Commands"
+.SH NAME
+qemate \- Manage QEMU virtual machines from the command line
+.SH SYNOPSIS
+.B qemate
+.I COMMAND
+[
+.I SUBCOMMAND
+] [
+.I OPTIONS
+]
+.SH DESCRIPTION
+.B Qemate
+is a streamlined command-line utility designed to simplify the management of QEMU virtual machines (VMs). It provides an intuitive interface for creating, starting, stopping, and deleting VMs, as well as configuring their networking. Qemate leverages QEMU with KVM acceleration for enhanced performance when supported by the host system.
+
+Qemate requires
+.B QEMU
+(version 8.0.0 or higher) and Bash (version 4.0 or higher) to be installed. Many commands accept either the VM name or its ID, which can be obtained from the `vm list` command output.
+.SH COMMANDS
+.SS "vm - Manage Virtual Machines"
+.TP
+.B create
+qemate vm create
+.I NAME
+[
+.I OPTIONS
+]
+.br
+Create a new VM with the specified name.
+
+Options:
+.RS
+.TP
+.B --memory VALUE
+Memory size (e.g., 4G, 2048M; default: 2G)
+.TP
+.B --cores VALUE
+Number of CPU cores (default: 2)
+.TP
+.B --disk-size VALUE
+Disk size (e.g., 20G, 1024M; default: 20G)
+.TP
+.B --machine VALUE
+Machine type (e.g., q35, pc; default: q35)
+.TP
+.B --iso PATH
+Path to an ISO file to start the VM with
+.RE
+.TP
+.B start
+qemate vm start
+.I NAME_OR_ID
+[
+.I OPTIONS
+]
+.br
+Start the VM with the given name or ID.
+
+Options:
+.RS
+.TP
+.B --iso PATH
+Path to an ISO file for installation
+.TP
+.B --headless
+Run without a graphical console
+.RE
+.TP
+.B stop
+qemate vm stop
+.I NAME_OR_ID
+[
+.B --force
+]
+.br
+Stop the VM. Use --force to terminate immediately if graceful shutdown fails.
+.TP
+.B status
+qemate vm status
+.I NAME_OR_ID
+.br
+Display the detailed status of the VM (e.g., state, memory, disk usage).
+.TP
+.B delete
+qemate vm delete
+.I NAME_OR_ID
+[
+.B --force
+]
+.br
+Delete the VM and its associated files. Use --force to skip confirmation.
+.TP
+.B list
+qemate vm list
+.br
+List all VMs with details (ID, name, status, memory, cores, disk size).
+.SS "net - Configure Networking"
+.TP
+.B port
+Manage port forwards (VM must be stopped).
+.RS
+.TP
+.B list NAME_OR_ID
+List all port forwards for the VM.
+.TP
+.B add NAME_OR_ID --host PORT --guest PORT [--proto PROTO]
+Add a port forward (e.g., --host 8080 --guest 80 --proto tcp).
+.TP
+.B remove NAME_OR_ID PORT[:PROTO]
+Remove a port forward (e.g., 8080:tcp).
+.RE
+.TP
+.B set
+qemate net set
+.I NAME_OR_ID
+.I {nat|user|none}
+.br
+Set the network type for the VM (default: user).
+.TP
+.B model
+qemate net model
+.I NAME_OR_ID
+[
+.I {e1000|virtio-net-pci}
+]
+.br
+Set the network device model (default: virtio-net-pci).
+.SS "help - Display Help"
+.TP
+.B help
+qemate help
+.br
+Display the main help message. Use `qemate COMMAND help` for command-specific help.
+.SS "version - Show Version"
+.TP
+.B version
+qemate version
+.br
+Display the program version (1.1.0).
+.SH EXAMPLES
+Create a VM with 4GB memory and 4 cores:
+.EX
+qemate vm create myvm --memory 4G --cores 4
+.EE
+Start a VM with an ISO in headless mode:
+.EX
+qemate vm start myvm --iso /path/to/install.iso --headless
+.EE
+Add a port forward:
+.EX
+qemate net port add myvm --host 8080 --guest 80
+.EE
+Set network type to NAT:
+.EX
+qemate net set myvm nat
+.EE
+List all VMs:
+.EX
+qemate vm list
+.EE
+Show version:
+.EX
+qemate version
+.EE
+.SH FILES
+.TP
+.I ~/QVMs/VM_NAME/config
+Configuration file for each VM.
+.TP
+.I ~/QVMs/VM_NAME/disk.qcow2
+Disk image for each VM.
+.TP
+.I ~/QVMs/logs/qemate.log
+Global log file for Qemate operations.
+.SH EXIT STATUS
+.TP
+0
+Success
+.TP
+1
+Failure
+.SH AUTHOR
+Daniel Zilli
+.SH LICENSE
+BSD 3-Clause License\n\n================
+File: ./uninstall.sh
+Tokens: 249
+================
+#!/bin/bash
+# Qemate Uninstallation Script
+
+set -e
+
+# Default installation paths (must match install.sh)
+PREFIX="${PREFIX:-/usr/local}"
+BINDIR="${BINDIR:-$PREFIX/bin}"
+LIBDIR="${LIBDIR:-$PREFIX/share/qemate}"
+DOCDIR="${DOCDIR:-$PREFIX/share/doc/qemate}"
+MANDIR="${MANDIR:-$PREFIX/share/man/man1}"
+COMPLETIONDIR="${COMPLETIONDIR:-$PREFIX/share/bash-completion/completions}"
+
+# Print header
+echo "=== Qemate Uninstallation ==="
+echo "Removing from:"
+echo "  Binary:      $BINDIR"
+echo "  Libraries:   $LIBDIR"
+echo "  Docs:        $DOCDIR"
+echo "  Man Page:    $MANDIR"
+echo "  Completion:  $COMPLETIONDIR"
+echo ""
+
+# Remove main script
+echo "Removing main script..."
+if [ -f "$BINDIR/qemate" ]; then
+    rm -f "$BINDIR/qemate" || { echo "Failed to remove $BINDIR/qemate"; exit 1; }
+else
+    echo "Main script not found at $BINDIR/qemate, skipping."
+fi
+
+# Remove library files
+echo "Removing libraries..."
+if [ -d "$LIBDIR" ]; then
+    rm -rf "$LIBDIR" || { echo "Failed to remove $LIBDIR"; exit 1; }
+else
+    echo "Library directory not found at $LIBDIR, skipping."
+fi
+
+# Remove documentation
+echo "Removing documentation..."
+if [ -d "$DOCDIR" ]; then
+    rm -rf "$DOCDIR" || { echo "Failed to remove $DOCDIR"; exit 1; }
+else
+    echo "Documentation directory not found at $DOCDIR, skipping."
+fi
+
+# Remove man page
+echo "Removing man page..."
+if [ -f "$MANDIR/qemate.1" ]; then
+    rm -f "$MANDIR/qemate.1" || { echo "Failed to remove $MANDIR/qemate.1"; exit 1; }
+else
+    echo "Man page not found at $MANDIR/qemate.1, skipping."
+fi
+
+# Remove bash completion
+echo "Removing bash completion..."
+if [ -f "$COMPLETIONDIR/qemate" ]; then
+    rm -f "$COMPLETIONDIR/qemate" || { echo "Failed to remove $COMPLETIONDIR/qemate"; exit 1; }
+else
+    echo "Bash completion not found at $COMPLETIONDIR/qemate, skipping."
+fi
+
+echo ""
+echo "Uninstallation complete!"
+echo "Qemate has been removed from your system."\n\n================
+File: ./install.sh
+Tokens: 276
+================
+#!/bin/bash
+# Qemate Installation Script
+
+set -e
+
+# Default installation paths
+PREFIX="${PREFIX:-/usr/local}"
+BINDIR="${BINDIR:-$PREFIX/bin}"
+LIBDIR="${LIBDIR:-$PREFIX/share/qemate}"
+DOCDIR="${DOCDIR:-$PREFIX/share/doc/qemate}"
+MANDIR="${MANDIR:-$PREFIX/share/man/man1}"
+COMPLETIONDIR="${COMPLETIONDIR:-$PREFIX/share/bash-completion/completions}"
+
+# Print header
+echo "=== Qemate Installation ==="
+echo "Installing to:"
+echo "  Binary:      $BINDIR"
+echo "  Libraries:   $LIBDIR"
+echo "  Docs:        $DOCDIR"
+echo "  Man Page:    $MANDIR"
+echo "  Completion:  $COMPLETIONDIR"
+echo ""
+
+# Create directories
+echo "Creating directories..."
+mkdir -p "$BINDIR" || { echo "Failed to create $BINDIR"; exit 1; }
+mkdir -p "$LIBDIR" || { echo "Failed to create $LIBDIR"; exit 1; }
+mkdir -p "$DOCDIR" || { echo "Failed to create $DOCDIR"; exit 1; }
+mkdir -p "$MANDIR" || { echo "Failed to create $MANDIR"; exit 1; }
+mkdir -p "$COMPLETIONDIR" || { echo "Failed to create $COMPLETIONDIR"; exit 1; }
+
+# Install main script
+echo "Installing main script..."
+install -m 755 src/qemate.sh "$BINDIR/qemate" || { echo "Failed to install qemate.sh"; exit 1; }
+
+# Install library files
+echo "Installing libraries..."
+for lib in src/lib/*.sh; do
+    install -m 644 "$lib" "$LIBDIR/" || { echo "Failed to install $lib"; exit 1; }
+done
+
+# Install documentation
+echo "Installing documentation..."
+install -m 644 README.md "$DOCDIR/" || { echo "Failed to install README.md"; exit 1; }
+install -m 644 CHANGELOG.md "$DOCDIR/" || { echo "Failed to install CHANGELOG.md"; exit 1; }
+install -m 644 LICENSE "$DOCDIR/" || { echo "Failed to install LICENSE"; exit 1; }
+install -m 644 docs/man/qemate.1 "$MANDIR/" || { echo "Failed to install man page"; exit 1; }
+
+# Install bash completion
+echo "Installing bash completion..."
+install -m 644 completion/bash/qemate "$COMPLETIONDIR/" || { echo "Failed to install bash completion"; exit 1; }
+
+echo ""
+echo "Installation complete!"
+echo "Run 'qemate --help' to get started."\n\n================
+File: ./src/qemate.sh
+Tokens: 1451
+================
+#!/bin/bash
+################################################################################
+# Qemate - QEMU Virtual Machine Manager                                        #
+#                                                                              #
+# Description: A streamlined command-line tool for managing QEMU virtual       #
+#              machines with support for creation, control, and networking.    #
+# Author: Daniel Zilli                                                         #
+# Version: 1.1.0                                                               #
+# License: BSD 3-Clause License                                                #
+# Date: April 2025                                                             #
+################################################################################
+
+# Exit on error, undefined variable, or pipe failure
+set -euo pipefail
+
+###############################################################################
+# INITIALIZATION AND CONFIGURATION
+###############################################################################
+
+# Script location determination - using safe path resolution
+readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || {
+    echo "Error: Failed to determine script directory." >&2
+    exit 1
+}
+
+# Version detection from file or fallback to hardcoded value
+readonly VERSION=$([[ -r "${SCRIPT_DIR}/../VERSION" ]] && cat "${SCRIPT_DIR}/../VERSION" || echo "1.1.0")
+[[ ! -r "${SCRIPT_DIR}/../VERSION" ]] && echo "Warning: VERSION file not found, using default ${VERSION}" >&2
+
+# Load required library files
+declare -a LIBRARIES=("qemate_utils.sh" "qemate_net.sh" "qemate_vm.sh")
+for lib in "${LIBRARIES[@]}"; do
+    lib_path="${SCRIPT_DIR}/lib/${lib}"
+    # Check if library exists and is readable
+    [[ ! -f "${lib_path}" || ! -r "${lib_path}" ]] && {
+        echo "Error: Required library '${lib}' not found or not readable at ${lib_path}" >&2
+        exit 1
+    }
+    # Source library with error handling
+    source "${lib_path}" || {
+        echo "Error: Failed to source ${lib}" >&2
+        exit 1
+    }
+done
+
+# Perform system requirement validation
+check_system_requirements || {
+    echo "Error: System requirements not met" >&2
+    exit 1
+}
+
+# Set up signal handlers for clean termination
+setup_signal_handlers
+
+###############################################################################
+# COMMAND DISPATCH TABLES
+###############################################################################
+
+# Main command dispatch table
+declare -A COMMANDS=(
+    [vm]="handle_vm"
+    [net]="handle_net"
+    [help]="show_main_help"
+    [version]="show_version"
+)
+
+# VM subcommand dispatch table
+declare -A VM_COMMANDS=(
+    [create]="vm_create"
+    [start]="vm_start"
+    [stop]="vm_stop"
+    [status]="vm_status"
+    [delete]="vm_delete"
+    [list]="vm_list"
+    [wizard]="vm_wizard"
+    [edit]="vm_edit"
+)
+
+# Network port subcommand dispatch table
+declare -A NET_PORT_COMMANDS=(
+    [list]="net_port_list"
+    [add]="net_port_add"
+    [remove]="net_port_remove"
+)
+
+# Network type command dispatch table
+declare -A NET_TYPE_COMMANDS=(
+    [set]="net_type_set"
+)
+
+# Network model command dispatch table
+declare -A NET_MODEL_COMMANDS=(
+    [model]="net_model_set"
+)
+
+###############################################################################
+# HELP FUNCTIONS
+###############################################################################
+
+# Main help display function
+show_main_help() {
+    printf "%bQemate %s - QEMU Virtual Machine Manager%b\n\n" "${COLOR_INFO}" "${VERSION}" "${COLOR_RESET}"
+    printf "%bUsage:%b\n" "${COLOR_WARNING}" "${COLOR_RESET}"
+    printf "  qemate COMMAND [SUBCOMMAND] [OPTIONS]\n\n"
+    printf "%bCommands:%b\n" "${COLOR_WARNING}" "${COLOR_RESET}"
+    printf "  %bvm%b      Manage virtual machines.\n" "${COLOR_SUCCESS}" "${COLOR_RESET}"
+    printf "  %bnet%b     Configure networking.\n" "${COLOR_SUCCESS}" "${COLOR_RESET}"
+    printf "  %bhelp%b    Show this help or command-specific help.\n" "${COLOR_SUCCESS}" "${COLOR_RESET}"
+    printf "  %bversion%b Show the program version.\n\n" "${COLOR_SUCCESS}" "${COLOR_RESET}"
+    printf "%bExamples:%b\n" "${COLOR_WARNING}" "${COLOR_RESET}"
+    printf "  qemate vm create myvm --memory 4G --cores 4\n"
+    printf "  qemate net port add myvm --host 8080 --guest 80\n\n"
+    printf "Run '%bqemate COMMAND help%b' for more details.\n" "${COLOR_SUCCESS}" "${COLOR_RESET}"
+}
+
+# VM command help display
+show_vm_help() {
+    printf "%bQemate VM Command Help%b\n\n" "${COLOR_INFO}" "${COLOR_RESET}"
+    printf "%bUsage:%b\n" "${COLOR_WARNING}" "${COLOR_RESET}"
+    printf "  qemate vm SUBCOMMAND [OPTIONS]\n\n"
+    printf "%bSubcommands:%b\n" "${COLOR_WARNING}" "${COLOR_RESET}"
+    printf "  %b%-10s%b %-25s %s\n" "${COLOR_SUCCESS}" "create" "${COLOR_RESET}" "NAME [OPTIONS]" "Create a new VM."
+    printf "    %bOptions:%b --memory VALUE, --cores VALUE, --disk-size VALUE, --machine VALUE, --iso PATH\n" "${COLOR_WARNING}" "${COLOR_RESET}"
+    printf "  %b%-10s%b %-25s %s\n" "${COLOR_SUCCESS}" "start" "${COLOR_RESET}" "NAME_OR_ID [OPTIONS]" "Start an existing VM."
+    printf "    %bOptions:%b --iso PATH, --headless, --extra-args \"QEMU_OPTIONS\"\n" "${COLOR_WARNING}" "${COLOR_RESET}"
+    printf "  %b%-10s%b %-25s %s\n" "${COLOR_SUCCESS}" "stop" "${COLOR_RESET}" "NAME_OR_ID [--force]" "Stop a running VM."
+    printf "  %b%-10s%b %-25s %s\n" "${COLOR_SUCCESS}" "status" "${COLOR_RESET}" "NAME_OR_ID" "Display VM status."
+    printf "  %b%-10s%b %-25s %s\n" "${COLOR_SUCCESS}" "delete" "${COLOR_RESET}" "NAME_OR_ID [--force]" "Delete a VM."
+    printf "  %b%-10s%b %-25s %s\n" "${COLOR_SUCCESS}" "list" "${COLOR_RESET}" "" "List all VMs."
+    printf "  %b%-10s%b %-25s %s\n" "${COLOR_SUCCESS}" "wizard" "${COLOR_RESET}" "" "Interactive VM creation."
+    printf "  %b%-10s%b %-25s %s\n" "${COLOR_SUCCESS}" "edit" "${COLOR_RESET}" "NAME_OR_ID" "Edit VM configuration."
+    printf "\n%bExamples:%b\n" "${COLOR_WARNING}" "${COLOR_RESET}"
+    printf "  %-45s %s\n" "qemate vm create myvm --memory 4G --cores 4" "Create a VM with custom settings."
+    printf "  %-45s %s\n" "qemate vm start myvm --iso /path/to/install.iso --headless" "Start VM in headless mode."
+    printf "  %-45s %s\n" "qemate vm start myvm --extra-args \"-cpu host,+avx512\"" "Start VM with custom QEMU args."
+}
+
+# Network command help display
+show_net_help() {
+    printf "%bQemate Net Command Help%b\n\n" "${COLOR_INFO}" "${COLOR_RESET}"
+    printf "%bUsage:%b\n" "${COLOR_WARNING}" "${COLOR_RESET}"
+    printf "  qemate net SUBCOMMAND [OPTIONS]\n\n"
+    printf "%bSubcommands:%b\n" "${COLOR_WARNING}" "${COLOR_RESET}"
+    printf "  %bport%b    Configure port forwards (VM must be stopped).\n" "${COLOR_SUCCESS}" "${COLOR_RESET}"
+    printf "    %bSubcommands:%b\n" "${COLOR_WARNING}" "${COLOR_RESET}"
+    printf "      %badd%b     NAME_OR_ID         Add a port forward.\n" "${COLOR_SUCCESS}" "${COLOR_RESET}"
+    printf "        %bOptions:%b --host PORT, --guest PORT, --proto PROTO\n" "${COLOR_WARNING}" "${COLOR_RESET}"
+    printf "      %bremove%b  NAME_OR_ID PORT[:PROTO]  Remove a port forward.\n" "${COLOR_SUCCESS}" "${COLOR_RESET}"
+    printf "      %blist%b    NAME_OR_ID         List all port forwards.\n" "${COLOR_SUCCESS}" "${COLOR_RESET}"
+    printf "  %bset%b     NAME_OR_ID {nat|user|none}  Set the network type.\n" "${COLOR_SUCCESS}" "${COLOR_RESET}"
+    printf "  %bmodel%b   NAME_OR_ID [{e1000|virtio-net-pci}]  Set the network device model.\n" "${COLOR_SUCCESS}" "${COLOR_RESET}"
+    printf "\n%bExamples:%b\n" "${COLOR_WARNING}" "${COLOR_RESET}"
+    printf "  qemate net port add myvm --host 8080 --guest 80    Add a port forward.\n"
+    printf "  qemate net set myvm nat                            Set network type to NAT.\n"
+    printf "  qemate net model myvm virtio-net-pci               Set network model to virtio.\n"
+}
+
+# Network port help display
+show_net_port_help() {
+    printf "%bQemate Net Port Command Help%b\n\n" "${COLOR_INFO}" "${COLOR_RESET}"
+    printf "%bUsage:%b\n" "${COLOR_WARNING}" "${COLOR_RESET}"
+    printf "  qemate net port SUBCOMMAND [OPTIONS]\n\n"
+    printf "%bDescription:%b\n" "${COLOR_WARNING}" "${COLOR_RESET}"
+    printf "  Manage port forwards for a VM (VM must be stopped).\n\n"
+    printf "%bSubcommands:%b\n" "${COLOR_WARNING}" "${COLOR_RESET}"
+    printf "  %badd%b     NAME_OR_ID         Add a port forward.\n" "${COLOR_SUCCESS}" "${COLOR_RESET}"
+    printf "    %bOptions:%b --host PORT, --guest PORT, --proto PROTO\n" "${COLOR_WARNING}" "${COLOR_RESET}"
+    printf "  %bremove%b  NAME_OR_ID PORT[:PROTO]  Remove a port forward.\n" "${COLOR_SUCCESS}" "${COLOR_RESET}"
+    printf "  %blist%b    NAME_OR_ID         List all port forwards.\n" "${COLOR_SUCCESS}" "${COLOR_RESET}"
+}
+
+# Network set help display
+show_net_set_help() {
+    printf "%bQemate Net Set Command Help%b\n\n" "${COLOR_INFO}" "${COLOR_RESET}"
+    printf "%bUsage:%b\n" "${COLOR_WARNING}" "${COLOR_RESET}"
+    printf "  qemate net set NAME_OR_ID {nat|user|none}\n\n"
+    printf "%bDescription:%b\n" "${COLOR_WARNING}" "${COLOR_RESET}"
+    printf "  Set the network type for a VM.\n\n"
+    printf "%bOptions:%b\n" "${COLOR_WARNING}" "${COLOR_RESET}"
+    printf "  NAME_OR_ID         The name or ID of the VM.\n"
+    printf "  {nat|user|none}    Network type (default: user).\n"
+}
+
+# Network model help display
+show_net_model_help() {
+    printf "%bQemate Net Model Command Help%b\n\n" "${COLOR_INFO}" "${COLOR_RESET}"
+    printf "%bUsage:%b\n" "${COLOR_WARNING}" "${COLOR_RESET}"
+    printf "  qemate net model NAME_OR_ID [{e1000|virtio-net-pci}]\n\n"
+    printf "%bDescription:%b\n" "${COLOR_WARNING}" "${COLOR_RESET}"
+    printf "  Set the network device model for a VM.\n\n"
+    printf "%bOptions:%b\n" "${COLOR_WARNING}" "${COLOR_RESET}"
+    printf "  NAME_OR_ID             The name or ID of the VM.\n"
+    printf "  [{e1000|virtio-net-pci}]  Network model (default: virtio-net-pci).\n"
+}
+
+###############################################################################
+# COMMAND HANDLERS
+###############################################################################
+
+# Display version information and exit
+show_version() {
+    printf "Qemate %s\n" "${VERSION}"
+    exit 0
+}
+
+# Handle VM commands
+handle_vm() {
+    # Display help if no arguments or help requested
+    [[ $# -eq 0 || "$1" == "help" ]] && {
+        show_vm_help
+        exit 0
+    }
+    
+    local subcommand="$1"
+    shift
+    
+    # Validate command arguments before execution
+    validate_arguments "vm" "${subcommand}" "$@" || exit 1
+    
+    # Dispatch to appropriate VM handler function
+    dispatch "VM_COMMANDS" "${subcommand}" "$@" || {
+        log_message "ERROR" "Failed to execute vm ${subcommand}"
+        exit 1
+    }
+}
+
+# Handle networking commands
+handle_net() {
+    # Display help if no arguments or help requested
+    [[ $# -eq 0 || "$1" == "help" ]] && {
+        show_net_help
+        exit 0
+    }
+    
+    local subcommand="$1"
+    shift
+    
+    # Route to appropriate networking subcommand handler
+    case "${subcommand}" in
+        port) handle_net_port "$@" ;;
+        set) handle_net_set "$@" ;;
+        model) handle_net_model "$@" ;;
+        *)
+            log_message "ERROR" "Unknown net subcommand: ${subcommand}"
+            show_net_help
+            exit 1
+            ;;
+    esac
+}
+
+# Handle networking port commands
+handle_net_port() {
+    # Display help if no arguments or help requested
+    [[ $# -eq 0 || "$1" == "help" ]] && {
+        show_net_port_help
+        exit 0
+    }
+    
+    local subcommand="$1"
+    shift
+    
+    # Validate command arguments before execution
+    validate_arguments "net_port" "${subcommand}" "$@" || exit 1
+    
+    # Dispatch to appropriate port handler function
+    dispatch "NET_PORT_COMMANDS" "${subcommand}" "$@" || {
+        log_message "ERROR" "Failed to execute net port ${subcommand}"
+        exit 1
+    }
+}
+
+# Handle network type setting
+handle_net_set() {
+    # Display help if no arguments or help requested
+    [[ $# -eq 0 || "$1" == "help" ]] && {
+        show_net_set_help
+        exit 0
+    }
+    
+    # Validate command arguments before execution
+    validate_arguments "net_set" "set" "$@" || exit 1
+    
+    # Dispatch to network type set function
+    dispatch "NET_TYPE_COMMANDS" "set" "$@" || {
+        log_message "ERROR" "Failed to set network type"
+        exit 1
+    }
+}
+
+# Handle network model setting
+handle_net_model() {
+    # Display help if no arguments or help requested
+    [[ $# -eq 0 || "$1" == "help" ]] && {
+        show_net_model_help
+        exit 0
+    }
+    
+    # Validate command arguments before execution
+    validate_arguments "net_model" "model" "$@" || exit 1
+    
+    # Dispatch to network model set function
+    dispatch "NET_MODEL_COMMANDS" "model" "$@" || {
+        log_message "ERROR" "Failed to set network model"
+        exit 1
+    }
+}
+
+###############################################################################
+# MAIN FUNCTION
+###############################################################################
+
+# Main entry point for the script
+main() {
+    # Load VM cache for faster operation
+    cache_vms
+    
+    # Get the command or default to empty
+    local cmd="${1:-}"
+    shift || true
+    
+    # Display help if no command provided
+    [[ -z "${cmd}" ]] && {
+        show_main_help
+        exit 0
+    }
+    
+    # Check if command exists
+    [[ -z "${COMMANDS[${cmd}]+x}" ]] && {
+        log_message "ERROR" "Unknown command: ${cmd}"
+        show_main_help
+        exit 1
+    }
+    
+    # Dispatch to appropriate command handler
+    "${COMMANDS[${cmd}]}" "$@"
+}
+
+# Execute the main function with all script arguments
+main "$@"\n\n================
+File: ./src/lib/qemate_vm.sh
+Tokens: 2219
+================
+#!/bin/bash
+################################################################################
+# Qemate VM Module                                                             #
+#                                                                              #
+# Description: Core functions for managing QEMU virtual machines in Qemate.    #
+# Author: Daniel Zilli                                                         #
+# Version: 1.1.1                                                               #
+# License: BSD 3-Clause License                                                #
+# Date: April 2025                                                             #
+################################################################################
+
+# ============================================================================ #
+# INITIALIZATION                                                               #
+# ============================================================================ #
+
+# Ensure SCRIPT_DIR is set by the parent script
+[[ -z "${SCRIPT_DIR:-}" ]] && {
+    echo "Error: SCRIPT_DIR not set." >&2
+    exit 1
+}
+
+# Constants
+readonly QEMU_BIN="${QEMU_BIN:-qemu-system-x86_64}"
+readonly QEMU_IMG_BIN="${QEMU_IMG_BIN:-qemu-img}"
+readonly DEFAULT_DISK_SIZE="20G"
+readonly DEFAULT_MACHINE_TYPE="q35"
+readonly DEFAULT_CORES=2
+readonly DEFAULT_MEMORY="2G"
+
+# ============================================================================ #
+# HELPER FUNCTIONS                                                             #
+# ============================================================================ #
+
+# Parse arguments for VM creation
+# Arguments:
+#   $1: VM name
+#   $@: Additional arguments for VM creation
+# Returns:
+#   Line-separated list of parsed arguments
+parse_vm_create_args() {
+    local vm_name="$1"
+    shift
+    local disk_size="$DEFAULT_DISK_SIZE" iso_file="" machine_type="$DEFAULT_MACHINE_TYPE" cores="$DEFAULT_CORES" memory="$DEFAULT_MEMORY"
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+        --disk-size)
+            disk_size="$2"
+            shift 2
+            ;;
+        --iso)
+            iso_file="$2"
+            shift 2
+            ;;
+        --machine)
+            machine_type="$2"
+            shift 2
+            ;;
+        --cores)
+            cores="$2"
+            shift 2
+            ;;
+        --memory)
+            memory="$2"
+            shift 2
+            ;;
+        *)
+            log_message "ERROR" "Unknown option for 'create': $1."
+            return 1
+            ;;
+        esac
+    done
+    printf "%s\n" "$disk_size" "$iso_file" "$machine_type" "$cores" "$memory"
+}
+
+# Standardize memory format to a consistent representation
+# Arguments:
+#   $1: Memory specification (e.g., 2048M or 2G)
+# Returns:
+#   Standardized memory format (always in G)
+standardize_memory() {
+    local memory="$1"
+    
+    if [[ "$memory" =~ ^([0-9]+)([MmGg])$ ]]; then
+        local num="${BASH_REMATCH[1]}" unit="${BASH_REMATCH[2]}"
+        if [[ "$unit" =~ [Mm] ]]; then
+            local gib=$((num / 1024))
+            [[ $((num % 1024)) -ne 0 ]] && log_message "WARNING" "Memory $num${unit} not a clean GiB, rounding to ${gib}G."
+            printf "%dG" "$gib"
+        else
+            printf "%dG" "$num"
+        fi
+    else
+        log_message "ERROR" "Invalid memory format: $memory (use e.g., 2048M or 2G)."
+        return 1
+    fi
+}
+
+# Generate VM configuration file
+# Arguments:
+#   $1: VM name
+#   $2: Machine type
+#   $3: Number of CPU cores
+#   $4: Memory size
+#   $5: MAC address
+#   $6: Configuration file path
+# Returns:
+#   0 on success, non-zero on failure
+generate_vm_config() {
+    local vm_name="$1" machine_type="$2" cores="$3" memory="$4" mac_address="$5" config_file="$6"
+    local max_id=0
+    
+    # Find the highest existing VM ID
+    for config in "$VM_DIR"/*/config; do
+        [[ -f "$config" ]] || continue
+        if source "$config" && [[ "${ID:-0}" -gt "$max_id" ]]; then
+            max_id="${ID}"
+        fi
+    done
+    local new_id=$((max_id + 1))
+    
+    # Create the configuration file
+    cat <<EOF >"$config_file" || return 1
+ID=$new_id
+NAME="$vm_name"
+MACHINE_TYPE="$machine_type"
+CORES=$cores
+MEMORY="$memory"
+MAC_ADDRESS="$mac_address"
+NETWORK_TYPE="user"
+NETWORK_MODEL="virtio-net-pci"
+PORT_FORWARDING_ENABLED=0
+PORT_FORWARDS=""
+CPU_TYPE="host"
+ENABLE_KVM=1
+ENABLE_IO_THREADS=0
+DISK_CACHE="none"
+DISK_IO="native"
+DISK_DISCARD="unmap"
+ENABLE_VIRTIO=1
+MACHINE_OPTIONS="accel=kvm"
+VIDEO_TYPE="virtio-vga"
+DISK_INTERFACE="virtio-blk-pci"
+MEMORY_PREALLOC=0
+MEMORY_SHARE=1
+EOF
+}
+
+# ============================================================================ #
+# VM MANAGEMENT FUNCTIONS                                                      #
+# ============================================================================ #
+
+# Create a new virtual machine
+# Arguments:
+#   $1: VM name
+#   $@: Additional arguments for VM creation
+# Returns:
+#   0 on success, non-zero on failure
+vm_create() {
+    local vm_name="$1" mac_address
+    
+    # Generate MAC address for the VM
+    mac_address=$(generate_mac) || {
+        log_message "ERROR" "Failed to generate MAC address."
+        return 1
+    }
+    shift
+    
+    # Parse VM creation arguments
+    mapfile -t args < <(parse_vm_create_args "$vm_name" "$@") || return 1
+    local disk_size="${args[0]}" iso_file="${args[1]}" machine_type="${args[2]}" cores="${args[3]}" memory="${args[4]}"
+    memory=$(standardize_memory "$memory") || return 1
+
+    # Validate VM name and check if it already exists
+    is_valid_name "$vm_name" || {
+        log_message "ERROR" "Invalid VM name: $vm_name (use a-z, A-Z, 0-9, _, -)."
+        return 1
+    }
+    [[ -d "$VM_DIR/$vm_name" ]] && {
+        log_message "ERROR" "VM '$vm_name' already exists."
+        return 1
+    }
+
+    # Create VM directory
+    mkdir -p "$VM_DIR/$vm_name" || {
+        log_message "ERROR" "Failed to create directory for $vm_name."
+        return 1
+    }
+    
+    # Create temporary config file
+    local temp_config
+    temp_config=$(mktemp -t "qemate_vm.XXXXXX") || {
+        log_message "ERROR" "Failed to create temp config."
+        rmdir "$VM_DIR/$vm_name" 2>/dev/null
+        return 1
+    }
+    
+    # Generate VM configuration
+    generate_vm_config "$vm_name" "$machine_type" "$cores" "$memory" "$mac_address" "$temp_config" || {
+        rm -f "$temp_config"
+        rmdir "$VM_DIR/$vm_name" 2>/dev/null
+        return 1
+    }
+
+    # Create disk image
+    "$QEMU_IMG_BIN" create -f qcow2 "$VM_DIR/$vm_name/disk.qcow2" "$disk_size" >/dev/null 2>&1 || {
+        log_message "ERROR" "Failed to create disk image for $vm_name."
+        rm -f "$temp_config"
+        rmdir "$VM_DIR/$vm_name" 2>/dev/null
+        return 1
+    }
+    
+    # Move config file to final location and set permissions
+    mv "$temp_config" "$VM_DIR/$vm_name/config" && chmod 600 "$VM_DIR/$vm_name/config" "$VM_DIR/$vm_name/disk.qcow2" || {
+        log_message "ERROR" "Failed to finalize VM config for $vm_name."
+        rm -f "$VM_DIR/$vm_name/disk.qcow2" "$VM_DIR/$vm_name/config" "$temp_config" 2>/dev/null
+        rmdir "$VM_DIR/$vm_name" 2>/dev/null
+        return 1
+    }
+    
+    log_message "SUCCESS" "Created VM '$vm_name'."
+    
+    # Start VM with ISO if provided
+    [[ -n "$iso_file" ]] && vm_start "$vm_name" --iso "$iso_file"
+    
+    # Update VM cache
+    cache_vms
+}
+
+# Start a virtual machine
+# Arguments:
+#   $1: VM name or ID
+#   $@: Additional arguments for VM startup
+# Returns:
+#   0 on success, non-zero on failure
+vm_start() {
+    local name_or_id="$1" iso_file="" headless=0 extra_args=""
+    shift
+    
+    # Parse VM start arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+        --headless) 
+            headless=1
+            shift 
+            ;;
+        --iso) 
+            iso_file="$2"
+            shift 2 
+            ;;
+        --extra-args) 
+            extra_args="$2"
+            shift 2 
+            ;;
+        *) 
+            log_message "ERROR" "Unknown option for 'start': $1."
+            return 1 
+            ;;
+        esac
+    done
+
+    # Resolve VM name from ID if necessary
+    local vm_name
+    vm_name=$(get_vm_info "name_from_id" "$name_or_id" 2>/dev/null || echo "$name_or_id") || {
+        log_message "ERROR" "No VM found: $name_or_id."
+        return 1
+    }
+    validate_vm_identifier "$vm_name" "vm_start" || return 1
+
+    local vm_dir="$VM_DIR/$vm_name" 
+    local vm_lock="$TEMP_DIR/qemu-$vm_name.lock" 
+    local log_file="$LOG_DIR/${vm_name}_$(date +%Y%m%d_%H%M%S).log"
+    
+    # Check if VM is already running
+    pgrep -f "guest=$vm_name,process=qemu-$vm_name" >/dev/null && {
+        log_message "ERROR" "VM '$vm_name' already running."
+        return 1
+    }
+    
+    # Check display availability for non-headless mode
+    [[ "$headless" -eq 0 && -z "${DISPLAY:-}" ]] && ! xset q >/dev/null 2>&1 && {
+        log_message "ERROR" "No X display detected. Use --headless."
+        return 1
+    }
+
+    # Acquire lock for VM operations
+    acquire_lock "$vm_lock" || return 1
+    
+    # Load VM configuration
+    source "$vm_dir/config" || {
+        log_message "ERROR" "Failed to read config for $vm_name."
+        release_lock "$vm_lock"
+        return 1
+    }
+    
+    # Create log file
+    touch "$log_file" && chmod 600 "$log_file" || {
+        log_message "ERROR" "Failed to create log file: $log_file."
+        release_lock "$vm_lock"
+        return 1
+    }
+
+    # Build QEMU arguments
+    local -a qemu_args=(
+        "-machine" "type=${MACHINE_TYPE:-$DEFAULT_MACHINE_TYPE},${MACHINE_OPTIONS:-accel=kvm}"
+        "-cpu" "${CPU_TYPE:-host},migratable=off"
+        "-smp" "cores=${CORES:-$DEFAULT_CORES},threads=1"
+        "-m" "${MEMORY:-$DEFAULT_MEMORY}"
+    )
+    
+    # Add KVM and IO threads if enabled
+    [[ "${ENABLE_KVM:-1}" -eq 1 ]] && qemu_args+=("-enable-kvm")
+    [[ "${ENABLE_IO_THREADS:-0}" -eq 1 ]] && qemu_args+=("-object" "iothread,id=iothread0")
+    
+    # Memory options
+    [[ "${MEMORY_PREALLOC:-0}" -eq 1 ]] && qemu_args+=("-overcommit" "mem-lock=on")
+    [[ "${MEMORY_SHARE:-1}" -eq 1 ]] && qemu_args+=("-mem-prealloc")
+
+    # VM naming
+    qemu_args+=("-name" "guest=$vm_name,process=qemu-$vm_name")
+    
+    # Display options
+    if [[ "$headless" -eq 1 ]]; then
+        qemu_args+=("-display" "none" "-nographic")
+    else
+        local video_dev="${VIDEO_TYPE:-virtio-vga}"
+        if [[ "$video_dev" == "virtio" ]]; then
+            video_dev="virtio-vga"  # Ensure we use the full device name
+        elif [[ ! "$video_dev" =~ ^(virtio-vga|qxl|vga)$ ]]; then
+            video_dev="virtio-vga"  # Default to virtio-vga for invalid values
+        fi
+        qemu_args+=("-device" "$video_dev" "-display" "gtk")
+    fi
+
+    # Disk options
+    local aio_mode="${DISK_IO:-io_uring}"
+    local cache_mode="${DISK_CACHE:-none}"
+    if [[ "$aio_mode" == "native" ]]; then
+        cache_mode="direct=on"
+    else
+        cache_mode="${DISK_CACHE:-writeback}"
+    fi
+    
+    # Validate disk exists
+    [[ ! -f "$VM_DIR/$vm_name/disk.qcow2" ]] && { 
+        log_message "ERROR" "Disk not found for $vm_name"
+        release_lock "$vm_lock"
+        return 1
+    }
+    
+    # Add disk to QEMU arguments
+    qemu_args+=("-drive" "file=$VM_DIR/$vm_name/disk.qcow2,format=qcow2,aio=$aio_mode,cache=$cache_mode,discard=${DISK_DISCARD:-unmap}")
+
+    # Add disk interface if virtio is enabled
+    [[ "${ENABLE_VIRTIO:-1}" -eq 1 ]] && qemu_args+=("-device" "${DISK_INTERFACE:-virtio-blk-pci},drive=disk0,id=disk0")
+    
+    # Add ISO if specified
+    [[ -n "$iso_file" && -f "$iso_file" ]] && qemu_args+=("-drive" "file=$(printf '%q' "$iso_file"),format=raw,readonly=on,media=cdrom" "-boot" "order=d,once=d")
+
+    # Build network arguments
+    mapfile -t net_args < <(build_network_args "$vm_name") || {
+        log_message "WARNING" "Failed to build network args for '$vm_name'. Using default NAT."
+        net_args=("-netdev" "user,id=net0" "-device" "${NETWORK_MODEL:-virtio-net-pci},netdev=net0,mac=${MAC_ADDRESS}")
+    }
+    qemu_args+=("${net_args[@]}")
+    
+    # Add extra arguments if provided
+    [[ -n "$extra_args" ]] && qemu_args+=($extra_args)
+
+    # Start VM
+    log_message "INFO" "Starting VM '$vm_name'."
+    "$QEMU_BIN" "${qemu_args[@]}" >>"$log_file" 2>&1 &
+    local pid=$!
+    
+    # Verify VM started successfully
+    sleep 1
+    if ! kill -0 "$pid" 2>/dev/null; then
+        log_message "ERROR" "Failed to start VM '$vm_name'. Check $log_file for details."
+        release_lock "$vm_lock"
+        return 1
+    fi
+    
+    # Write PID to lock file
+    echo "$pid" >"$vm_lock/pid" || {
+        log_message "ERROR" "Failed to write PID to $vm_lock/pid."
+        kill "$pid" 2>/dev/null
+        release_lock "$vm_lock"
+        return 1
+    }
+    
+    release_lock "$vm_lock" || return 1
+    log_message "SUCCESS" "Started VM '$vm_name' (PID: $pid)."
+}
+
+# Stop a running virtual machine
+# Arguments:
+#   $1: VM name or ID
+#   $2: --force (optional) to force-stop the VM
+# Returns:
+#   0 on success, non-zero on failure
+vm_stop() {
+    local name_or_id="$1" force=0
+    shift
+    [[ $# -gt 0 && "$1" == "--force" ]] && {
+        force=1
+        shift
+    }
+
+    # Resolve VM name from ID if necessary
+    local vm_name
+    vm_name=$(get_vm_info "name_from_id" "$name_or_id" 2>/dev/null || echo "$name_or_id") || {
+        log_message "ERROR" "No VM found: $name_or_id."
+        return 1
+    }
+    validate_vm_identifier "$vm_name" "vm_stop" || return 1
+
+    # Get VM process ID
+    local pid
+    pid=$(pgrep -f "guest=$vm_name,process=qemu-$vm_name") || {
+        log_message "INFO" "VM '$vm_name' is not running."
+        return 0
+    }
+    
+    # Stop VM (force or graceful)
+    if [[ "$force" -eq 1 ]]; then
+        kill -9 "$pid" || {
+            log_message "ERROR" "Failed to force stop VM '$vm_name' (PID: $pid)."
+            return 1
+        }
+    else
+        kill "$pid" || {
+            log_message "ERROR" "Failed to stop VM '$vm_name' (PID: $pid)."
+            return 1
+        }
+    fi
+    
+    # Wait for VM to stop
+    for _ in {1..10}; do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            log_message "SUCCESS" "Stopped VM '$vm_name'."
+            return 0
+        fi
+        sleep 1
+    done
+    
+    log_message "ERROR" "Failed to stop VM '$vm_name' within timeout."
+    return 1
+}
+
+# Check VM status
+# Arguments:
+#   $1: VM name or ID
+# Returns:
+#   0 on success, non-zero on failure
+vm_status() {
+    local name_or_id="$1"
+    
+    # Resolve VM name from ID if necessary
+    local vm_name
+    vm_name=$(get_vm_info "name_from_id" "$name_or_id" 2>/dev/null || echo "$name_or_id") || {
+        log_message "ERROR" "No VM found: $name_or_id."
+        return 1
+    }
+    validate_vm_identifier "$vm_name" "vm_status" || return 1
+
+    # Check if VM is running and report status
+    if pgrep -f "guest=$vm_name,process=qemu-$vm_name" >/dev/null; then
+        local pid
+        pid=$(pgrep -f "guest=$vm_name,process=qemu-$vm_name")
+        log_message "INFO" "VM '$vm_name' is running (PID: $pid)."
+    else
+        log_message "INFO" "VM '$vm_name' is stopped."
+    fi
+}
+
+# Delete a virtual machine
+# Arguments:
+#   $1: VM name or ID
+#   $2: --force (optional) to force-delete a running VM
+# Returns:
+#   0 on success, non-zero on failure
+vm_delete() {
+    [[ $# -lt 1 ]] && {
+        log_message "ERROR" "Missing NAME_OR_ID for 'delete'."
+        return 1
+    }
+    local name_or_id="$1" force=0
+    shift
+    [[ $# -gt 0 && "$1" == "--force" ]] && {
+        force=1
+        shift
+    }
+
+    # Resolve VM name from ID if necessary
+    local vm_name
+    vm_name=$(get_vm_info "name_from_id" "$name_or_id" 2>/dev/null || echo "$name_or_id") || {
+        log_message "ERROR" "No VM found: $name_or_id."
+        return 1
+    }
+    validate_vm_identifier "$vm_name" "vm_delete" || return 1
+
+    # Check if VM is running
+    if pgrep -f "guest=$vm_name,process=qemu-$vm_name" >/dev/null && [[ "$force" -eq 0 ]]; then
+        log_message "ERROR" "VM '$vm_name' is running. Use --force to delete."
+        return 1
+    fi
+
+    # Prompt for confirmation
+    local confirm
+    read -r -p "Are you sure you want to delete VM '$vm_name'? [y/N] " confirm
+    case "$confirm" in
+    [yY] | [yY][eE][sS])
+        log_message "INFO" "User confirmed deletion of VM '$vm_name'."
+        ;;
+    *)
+        log_message "INFO" "Deletion of VM '$vm_name' canceled by user."
+        return 0
+        ;;
+    esac
+
+    # Force stop VM if needed
+    [[ "$force" -eq 1 ]] && vm_stop "$vm_name" --force
+    
+    # Delete VM files
+    rm -rf "$VM_DIR/$vm_name" || {
+        log_message "ERROR" "Failed to delete VM '$vm_name'."
+        return 1
+    }
+    log_message "SUCCESS" "Deleted VM '$vm_name'."
+    
+    # Update VM cache
+    cache_vms
+}
+
+# List all virtual machines
+# Arguments: None
+# Returns:
+#   0 on success, non-zero on failure
+vm_list() {
+    # Update VM cache
+    cache_vms
+    
+    # Check if any VMs exist
+    if [[ ${#VM_CACHE[@]} -eq 0 ]]; then
+        log_message "INFO" "No VMs found."
+        return 0
+    fi
+    
+    # Display VM list header
+    printf "%-5s %-20s %-10s\n" "ID" "NAME" "STATUS"
+    printf "%s\n" "----------------------------------------"
+    
+    # List each VM with its status
+    for vm_name in "${!VM_CACHE[@]}"; do
+        local status="Stopped"
+        pgrep -f "guest=$vm_name,process=qemu-$vm_name" >/dev/null && status="Running"
+        printf "%-5s %-20s %-10s\n" "${VM_CACHE[$vm_name]}" "$vm_name" "$status"
+    done
+}
+
+# Interactive wizard for VM creation
+# Arguments: None
+# Returns:
+#   0 on success, non-zero on failure
+vm_wizard() {
+    log_message "INFO" "Starting VM creation wizard."
+    local vm_name disk_size iso_file machine_type cores memory
+
+    # VM name prompt
+    while true; do
+        read -r -p "Enter VM name: " vm_name
+        if is_valid_name "$vm_name"; then
+            break
+        else
+            log_message "ERROR" "Invalid VM name: $vm_name (use a-z, A-Z, 0-9, _, -)."
+        fi
+    done
+
+    # Disk size prompt
+    read -r -p "Disk size (default: $DEFAULT_DISK_SIZE): " disk_size
+    disk_size="${disk_size:-$DEFAULT_DISK_SIZE}"
+
+    # ISO file prompt
+    read -r -p "ISO file path (optional): " iso_file
+
+    # Machine type prompt
+    read -r -p "Machine type (default: $DEFAULT_MACHINE_TYPE): " machine_type
+    machine_type="${machine_type:-$DEFAULT_MACHINE_TYPE}"
+
+    # Number of cores prompt
+    while true; do
+        read -r -p "Number of cores (default: $DEFAULT_CORES): " cores
+        cores="${cores:-$DEFAULT_CORES}"
+        if [[ "$cores" =~ ^[0-9]+$ && "$cores" -gt 0 ]]; then
+            break
+        else
+            log_message "ERROR" "Invalid number of cores: $cores (must be a positive integer)."
+        fi
+    done
+
+    # Memory prompt
+    while true; do
+        read -r -p "Memory (default: $DEFAULT_MEMORY, e.g., 2048M or 2G): " memory
+        memory="${memory:-$DEFAULT_MEMORY}"
+        if standardize_memory "$memory" >/dev/null 2>&1; then
+            memory=$(standardize_memory "$memory")
+            break
+        else
+            log_message "ERROR" "Invalid memory format: $memory (use e.g., 2048M or 2G)."
+        fi
+    done
+
+    # Create VM with collected parameters
+    vm_create "$vm_name" --disk-size "$disk_size" --iso "$iso_file" --machine "$machine_type" --cores "$cores" --memory "$memory"
+}
+
+# Edit VM configuration
+# Arguments:
+#   $1: VM name or ID
+# Returns:
+#   0 on success, non-zero on failure
+vm_edit() {
+    local name_or_id="$1"
+    
+    # Resolve VM name from ID if necessary
+    local vm_name
+    vm_name=$(get_vm_info "name_from_id" "$name_or_id" 2>/dev/null || echo "$name_or_id") || {
+        log_message "ERROR" "No VM found: $name_or_id."
+        return 1
+    }
+    validate_vm_identifier "$vm_name" "vm_edit" || return 1
+
+    # Check if VM is running
+    if pgrep -f "guest=$vm_name,process=qemu-$vm_name" >/dev/null; then
+        log_message "ERROR" "Cannot edit running VM '$vm_name'. Stop it first."
+        return 1
+    fi
+    
+    # Open editor for VM configuration
+    local editor="${EDITOR:-nano}"
+    "$editor" "$VM_DIR/$vm_name/config" || {
+        log_message "ERROR" "Failed to edit config for $vm_name."
+        return 1
+    }
+    log_message "SUCCESS" "Edited config for VM '$vm_name'."
+    
+    # Update VM cache
+    cache_vms
+}\n\n================
+File: ./src/lib/qemate_utils.sh
+Tokens: 2472
+================
+#!/bin/bash
+################################################################################
+# Qemate Utilities Module                                                      #
+#                                                                              #
+# Description: Utility functions for logging, signal handling, system checks,  #
+#              and VM management in Qemate.                                    #
+# Author: Daniel Zilli                                                         #
+# Version: 1.1.0                                                               #
+# License: BSD 3-Clause License                                                #
+# Date: April 2025                                                             #
+################################################################################
+
+# Ensure SCRIPT_DIR is set by the parent script
+[[ -z "${SCRIPT_DIR:-}" ]] && {
+    echo "Error: SCRIPT_DIR not set." >&2
+    exit 1
+}
+
+###############################################################################
+# CONSTANTS AND INITIALIZATION
+###############################################################################
+
+# Directory structure constants
+if [[ -z "${VM_DIR:-}" ]]; then
+    VM_DIR="${HOME}/QVMs"
+    readonly VM_DIR
+fi
+if [[ -z "${LOG_DIR:-}" ]]; then
+    LOG_DIR="${VM_DIR}/logs"
+    readonly LOG_DIR
+fi
+
+# Create temporary directory with proper error handling
+TEMP_DIR=""
+if ! TEMP_DIR=$(mktemp -d -t "qemate.XXXXXXXXXX" 2>/dev/null); then
+    echo "Error: Failed to create temp directory." >&2
+    exit 1
+fi
+readonly TEMP_DIR
+
+# Define required commands
+readonly REQUIRED_COMMANDS=("qemu-system-x86_64" "qemu-img" "pgrep" "mktemp" "find" "sed" "flock")
+
+# Logging setup
+declare -A LOG_LEVELS=([DEBUG]=0 [INFO]=1 [WARNING]=2 [ERROR]=3)
+readonly COLOR_INFO="\033[0;32m" 
+readonly COLOR_SUCCESS="\033[0;32m" 
+readonly COLOR_WARNING="\033[1;33m" 
+readonly COLOR_ERROR="\033[0;31m" 
+readonly COLOR_RESET="\033[0m"
+: "${LOG_LEVEL:=INFO}" "${DEBUG:=0}"
+
+# VM cache
+declare -A VM_CACHE
+VM_CACHE_TIMESTAMP=0
+
+###############################################################################
+# DIRECTORY INITIALIZATION
+###############################################################################
+
+# Initialize directories with proper permissions
+for dir in "$VM_DIR" "$LOG_DIR" "$TEMP_DIR"; do
+    if ! mkdir -p "$dir" 2>/dev/null; then
+        echo "Error: Failed to create directory: $dir." >&2
+        exit 1
+    fi
+    if ! chmod 700 "$dir" 2>/dev/null; then
+        echo "Error: Failed to set permissions on $dir." >&2
+        exit 1
+    fi
+done
+
+###############################################################################
+# LOGGING FUNCTIONS
+###############################################################################
+
+# Format a log message with appropriate color coding
+# Arguments:
+#   $1 - Log level (INFO, SUCCESS, WARNING, ERROR, DEBUG)
+#   $2 - Message to format
+# Returns:
+#   Formatted message string with color codes
+format_message() {
+    local level="$1" message="$2"
+    case "$level" in
+        INFO)    printf "%s[INFO]%s %s" "$COLOR_INFO" "$COLOR_RESET" "$message" ;;
+        SUCCESS) printf "%s[SUCCESS]%s %s" "$COLOR_SUCCESS" "$COLOR_RESET" "$message" ;;
+        WARNING) printf "%s[WARNING]%s %s" "$COLOR_WARNING" "$COLOR_RESET" "$message" ;;
+        ERROR)   printf "%s[ERROR]%s %s" "$COLOR_ERROR" "$COLOR_RESET" "$message" ;;
+        DEBUG)   printf "[DEBUG] %s" "$message" ;;
+        *)       printf "%s" "$message" ;;
+    esac
+}
+
+# Log a message to both console and log file
+# Arguments:
+#   $1 - Log level (INFO, SUCCESS, WARNING, ERROR, DEBUG)
+#   $2 - Message to log
+# Returns:
+#   0 on success, 1 on failure
+log_message() {
+    local level="$1" message="$2" timestamp
+    
+    # Get current timestamp with error handling
+    if ! timestamp=$(date '+%Y-%m-%d %H:%M:%S'); then
+        echo "Error: Failed to get timestamp." >&2
+        return 1
+    fi
+    
+    local pid=$$
+    
+    # Skip if log level is below configured threshold
+    [[ "${LOG_LEVELS[$level]:-3}" -lt "${LOG_LEVELS[$LOG_LEVEL]:-1}" ]] && return 0
+    
+    # Format the message
+    local formatted
+    if ! formatted=$(format_message "$level" "$message"); then
+        return 1
+    fi
+    
+    # Print to console if appropriate for the log level
+    if [[ "$level" == "DEBUG" && "$DEBUG" == "1" ]] || [[ "$level" != "DEBUG" ]]; then
+        # Strip colors for non-terminal output
+        if [[ -t 1 || -t 2 ]]; then
+            echo -e "$formatted"
+        else
+            echo -e "$formatted" | sed 's/\x1b\[[0-9;]*m//g'
+        fi
+        
+        # Append to log file with error handling
+        if ! printf "%s [%s] [%s] %s\n" "$timestamp" "$pid" "$level" "$message" >>"$LOG_DIR/qemate.log" 2>/dev/null; then
+            echo "Warning: Failed to write to log file: $LOG_DIR/qemate.log" >&2
+        fi
+    fi
+    
+    return 0
+}
+
+###############################################################################
+# SIGNAL HANDLING
+###############################################################################
+
+# Set up signal handlers for graceful cleanup
+# Arguments: None
+# Returns: None
+setup_signal_handlers() {
+    trap 'signal_handler SIGINT' INT
+    trap 'signal_handler SIGTERM' TERM
+    trap 'signal_handler SIGHUP' HUP
+    trap 'signal_handler EXIT' EXIT
+}
+
+# Signal handler function
+# Arguments:
+#   $1 - Signal name (SIGINT, SIGTERM, SIGHUP, EXIT)
+# Returns: None
+signal_handler() {
+    local signal="${1:-EXIT}"
+    local exit_status=$?
+    
+    if [[ "$signal" == "EXIT" ]]; then
+        if [[ "$exit_status" -ne 0 ]]; then
+            log_message "WARNING" "Received EXIT with non-zero status. Cleaning up."
+            cleanup_function "WARNING"
+        else
+            cleanup_function ""
+        fi
+    else
+        log_message "INFO" "Received signal: $signal. Cleaning up."
+        cleanup_function "INFO"
+    fi
+}
+
+# Cleanup function to remove temporary files and directories
+# Arguments:
+#   $1 - Log level to use for cleanup messages (optional)
+# Returns: None
+cleanup_function() {
+    local log_level="$1"
+    
+    if [[ -n "$log_level" ]]; then
+        log_message "$log_level" "Performing cleanup."
+    fi
+    
+    if [[ -d "$TEMP_DIR" ]]; then
+        if ! rm -rf "$TEMP_DIR"; then
+            log_message "WARNING" "Failed to remove temp directory: $TEMP_DIR."
+        fi
+    fi
+}
+
+###############################################################################
+# SYSTEM CHECKS
+###############################################################################
+
+# Check if all required commands are available and system is properly configured
+# Arguments: None
+# Returns:
+#   0 if all requirements are met, 1 otherwise
+check_system_requirements() {
+    local missing=()
+    
+    # Check for required commands
+    for cmd in "${REQUIRED_COMMANDS[@]}"; do
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+            missing+=("$cmd")
+        fi
+    done
+    
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        log_message "ERROR" "Missing required commands: ${missing[*]}."
+        return 1
+    fi
+    
+    # Check if home directory is writable
+    if [[ ! -w "$HOME" ]]; then
+        log_message "ERROR" "Home directory ($HOME) is not writable."
+        return 1
+    fi
+    
+    return 0
+}
+
+###############################################################################
+# VM MANAGEMENT FUNCTIONS
+###############################################################################
+
+# Cache VM information to improve performance
+# Arguments: None
+# Returns:
+#   0 on success, 1 on failure
+cache_vms() {
+    local now
+    
+    # Get current timestamp with error handling
+    if ! now=$(date +%s); then
+        log_message "ERROR" "Failed to get timestamp."
+        return 1
+    fi
+    
+    # Skip caching if cache is still fresh (less than 30 seconds old)
+    [[ -n "${VM_CACHE_TIMESTAMP:-}" && $((now - VM_CACHE_TIMESTAMP)) -lt 30 ]] && return 0
+    
+    # Clear existing cache
+    VM_CACHE=()
+    
+    # Find all VM directories
+    local vm_paths
+    if ! mapfile -t vm_paths < <(find "$VM_DIR" -mindepth 1 -maxdepth 1 -type d -print | sort); then
+        log_message "ERROR" "Failed to list VMs."
+        return 1
+    fi
+    
+    # Process each VM directory
+    for vm_path in "${vm_paths[@]}"; do
+        local config_file="$vm_path/config"
+        [[ ! -f "$config_file" ]] && continue
+        
+        local vm_name
+        if ! vm_name=$(basename "$vm_path"); then
+            continue
+        fi
+        
+        # Source the config file safely
+        if ! source "$config_file"; then
+            log_message "WARNING" "Failed to source config for $vm_name."
+            continue
+        fi
+        
+        # Add to cache
+        VM_CACHE["$vm_name"]="${ID:-}"
+    done
+    
+    # Update cache timestamp
+    VM_CACHE_TIMESTAMP="$now"
+    return 0
+}
+
+# Get VM information by name or ID
+# Arguments:
+#   $1 - Mode ("name_from_id" or "id_from_name")
+#   $2 - Value to lookup
+# Returns:
+#   The requested information on success, 1 on failure
+get_vm_info() {
+    local mode="$1" value="$2"
+    
+    # Ensure cache is populated
+    [[ -z "${VM_CACHE[*]}" ]] && cache_vms
+    
+    case "$mode" in
+        name_from_id)
+            # Try cache first
+            for vm_name in "${!VM_CACHE[@]}"; do
+                [[ "${VM_CACHE[$vm_name]}" == "$value" ]] && {
+                    printf "%s" "$vm_name"
+                    return 0
+                }
+            done
+            
+            # Fall back to checking all config files
+            for config in "$VM_DIR"/*/config; do
+                [[ -f "$config" ]] || continue
+                if source "$config" && [[ "${ID:-}" == "$value" ]]; then
+                    printf "%s" "$NAME"
+                    return 0
+                fi
+            done
+            
+            log_message "ERROR" "No VM found with ID: $value."
+            return 1
+            ;;
+            
+        id_from_name)
+            # Try cache first
+            if [[ -n "${VM_CACHE[$value]}" ]]; then
+                printf "%s" "${VM_CACHE[$value]}"
+                return 0
+            fi
+            
+            # Fall back to checking specific config file
+            local config="$VM_DIR/$value/config"
+            [[ -f "$config" ]] || {
+                log_message "ERROR" "VM not found: $value."
+                return 1
+            }
+            
+            if source "$config"; then
+                printf "%s" "${ID:-}"
+                return 0
+            fi
+            
+            log_message "ERROR" "Failed to source config for $value."
+            return 1
+            ;;
+            
+        *)
+            log_message "ERROR" "Invalid mode: $mode."
+            return 1
+            ;;
+    esac
+}
+
+###############################################################################
+# CONFIG FILE MANAGEMENT
+###############################################################################
+
+# Safe handling of config file updates
+# Arguments:
+#   $1 - Path to config file
+#   $2 - Callback function to modify the config
+# Returns:
+#   0 on success, 1 on failure
+with_config_file() {
+    local config_file="$1" callback="$2" temp_config
+    
+    # Create temporary file
+    if ! temp_config=$(mktemp -t "qemate_config.XXXXXX"); then
+        log_message "ERROR" "Failed to create temp config."
+        return 1
+    fi
+    
+    # Copy original config to temp file
+    if ! cp "$config_file" "$temp_config"; then
+        log_message "ERROR" "Failed to copy config to $temp_config."
+        rm -f "$temp_config"
+        return 1
+    fi
+    
+    # Apply the callback function to modify the temp config
+    if ! "$callback" "$temp_config"; then
+        rm -f "$temp_config"
+        return 1
+    fi
+    
+    # Replace original with modified config
+    if ! mv "$temp_config" "$config_file" || ! chmod 600 "$config_file"; then
+        log_message "ERROR" "Failed to update config file: $config_file."
+        return 1
+    fi
+    
+    return 0
+}
+
+###############################################################################
+# LOCK MANAGEMENT
+###############################################################################
+
+# Acquire a lock to prevent concurrent operations
+# Arguments:
+#   $1 - Lock directory path
+#   $2 - Lock timeout in seconds (optional, default: 3600)
+# Returns:
+#   0 on success, 1 on failure, 2 if lock is held by another process
+acquire_lock() {
+    local lock_dir="$1" timeout="${2:-3600}"
+    
+    # Create lock directory
+    if ! mkdir -p "$lock_dir"; then
+        log_message "ERROR" "Failed to create lock directory: $lock_dir."
+        return 1
+    fi
+    
+    # Try to acquire lock using flock
+    (
+        if ! flock -n 9; then
+            if [[ -f "$lock_dir/pid" && -f "$lock_dir/time" ]]; then
+                local pid lock_time
+                
+                # Read PID and lock time
+                if ! read -r pid <"$lock_dir/pid"; then
+                    return 1
+                fi
+                
+                if ! read -r lock_time <"$lock_dir/time"; then
+                    return 1
+                fi
+                
+                # Check if process still exists
+                if kill -0 "$pid" 2>/dev/null; then
+                    # Check if lock has expired
+                    if [[ $(($(date +%s) - lock_time)) -gt "$timeout" ]]; then
+                        log_message "WARNING" "Removing stale lock (PID $pid, > $timeout seconds)."
+                    else
+                        log_message "ERROR" "Lock held by PID $pid."
+                        return 2
+                    fi
+                else
+                    log_message "WARNING" "Removing stale lock for PID $pid (process not running)."
+                fi
+            else
+                log_message "ERROR" "Failed to acquire lock: $lock_dir."
+                return 1
+            fi
+        fi
+        
+        # Write PID and timestamp to lock files
+        if ! echo "$$" >"$lock_dir/pid"; then
+            return 1
+        fi
+        
+        if ! date +%s >"$lock_dir/time"; then
+            return 1
+        fi
+        
+        return 0
+    ) 9>"$lock_dir/lock"
+    
+    return $?
+}
+
+# Release a previously acquired lock
+# Arguments:
+#   $1 - Lock directory path
+# Returns:
+#   0 on success, 1 on failure
+release_lock() {
+    local lock_dir="$1"
+    
+    if [[ -d "$lock_dir" ]]; then
+        if ! rm -rf "$lock_dir"; then
+            log_message "WARNING" "Failed to release lock: $lock_dir."
+            return 1
+        fi
+    fi
+    
+    return 0
+}
+
+###############################################################################
+# VALIDATION FUNCTIONS
+###############################################################################
+
+# Check if a VM name is valid
+# Arguments:
+#   $1 - Name to validate
+# Returns:
+#   0 if valid, 1 if invalid
+is_valid_name() {
+    [[ -n "$1" && "${#1}" -le 64 && "$1" =~ ^[a-zA-Z0-9_-]+$ && "$1" != *".."* ]]
+}
+
+# Validate command arguments
+# Arguments:
+#   $1 - Context (vm, net_port, net_set, net_model)
+#   $2 - Subcommand
+#   $@ - Command arguments to validate
+# Returns:
+#   0 if valid, 1 if invalid
+validate_arguments() {
+    local context="$1" subcommand="$2"
+    shift 2
+    
+    case "$context" in
+        vm)
+            case "$subcommand" in
+                create)
+                    [[ $# -lt 1 ]] && {
+                        log_message "ERROR" "Missing VM name for 'create'."
+                        return 1
+                    }
+                    is_valid_name "$1" || {
+                        log_message "ERROR" "Invalid VM name: $1."
+                        return 1
+                    }
+                    shift
+                    while [[ $# -gt 0 ]]; do
+                        case "$1" in
+                            --memory | --cores | --disk-size | --machine | --iso)
+                                [[ -n "${2:-}" ]] || {
+                                    log_message "ERROR" "Option $1 requires a value."
+                                    return 1
+                                }
+                                shift 2
+                                ;;
+                            *)
+                                log_message "ERROR" "Unknown option for 'create': $1."
+                                return 1
+                                ;;
+                        esac
+                    done
+                    ;;
+                start)
+                    [[ $# -lt 1 ]] && {
+                        log_message "ERROR" "Missing NAME_OR_ID for 'start'."
+                        return 1
+                    }
+                    shift
+                    while [[ $# -gt 0 ]]; do
+                        case "$1" in
+                            --iso | --extra-args)
+                                [[ -n "${2:-}" ]] || {
+                                    log_message "ERROR" "Option $1 requires a value."
+                                    return 1
+                                }
+                                shift 2
+                                ;;
+                            --headless) 
+                                shift 
+                                ;;
+                            *)
+                                log_message "ERROR" "Unknown option for 'start': $1."
+                                return 1
+                                ;;
+                        esac
+                    done
+                    ;;
+                stop | status | delete | edit)
+                    [[ $# -lt 1 ]] && {
+                        log_message "ERROR" "Missing NAME_OR_ID for '$subcommand'."
+                        return 1
+                    }
+                    # Handle --force option
+                    if [[ "$subcommand" == "stop" || "$subcommand" == "delete" ]]; then
+                        [[ $# -gt 1 && "$1" == "--force" ]] && shift # If --force is first (unlikely)
+                        [[ $# -gt 1 && "$2" == "--force" ]] && shift # If --force is second
+                    fi
+                    ;;
+                list | wizard) 
+                    # No validation needed
+                    ;;
+                *)
+                    log_message "ERROR" "Unknown VM subcommand: $subcommand."
+                    return 1
+                    ;;
+            esac
+            ;;
+        net_port)
+            case "$subcommand" in
+                add)
+                    [[ $# -lt 1 ]] && {
+                        log_message "ERROR" "Missing NAME_OR_ID for 'port add'."
+                        return 1
+                    }
+                    shift
+                    while [[ $# -gt 0 ]]; do
+                        case "$1" in
+                            --host | --guest | --proto)
+                                [[ -n "${2:-}" ]] || {
+                                    log_message "ERROR" "Option $1 requires a value."
+                                    return 1
+                                }
+                                shift 2
+                                ;;
+                            *)
+                                log_message "ERROR" "Unknown option for 'port add': $1."
+                                return 1
+                                ;;
+                        esac
+                    done
+                    ;;
+                remove | list)
+                    [[ $# -lt 1 ]] && {
+                        log_message "ERROR" "Missing NAME_OR_ID for 'port $subcommand'."
+                        return 1
+                    }
+                    ;;
+                *)
+                    log_message "ERROR" "Unknown port subcommand: $subcommand."
+                    return 1
+                    ;;
+            esac
+            ;;
+        net_set)
+            [[ $# -lt 2 ]] && {
+                log_message "ERROR" "Missing NAME_OR_ID or type for 'set'."
+                return 1
+            }
+            [[ "$2" =~ ^(nat|user|none)$ ]] || {
+                log_message "ERROR" "Invalid network type: $2."
+                return 1
+            }
+            ;;
+        net_model)
+            [[ $# -lt 1 ]] && {
+                log_message "ERROR" "Missing NAME_OR_ID for 'model'."
+                return 1
+            }
+            [[ $# -gt 1 && ! "$2" =~ ^(e1000|virtio-net-pci)$ ]] && {
+                log_message "ERROR" "Invalid network model: $2."
+                return 1
+            }
+            ;;
+        *)
+            log_message "ERROR" "Unknown validation context: $context."
+            return 1
+            ;;
+    esac
+    
+    return 0
+}
+
+# Validate a VM identifier (name or ID)
+# Arguments:
+#   $1 - VM identifier (name or ID)
+#   $2 - Error context for meaningful error messages
+# Returns:
+#   0 if valid, 1 if invalid
+validate_vm_identifier() {
+    local identifier="$1" error_context="$2"
+    
+    # Check if identifier is a numeric ID
+    if [[ "$identifier" =~ ^[0-9]+$ ]]; then
+        # Try to find VM name from ID
+        if ! get_vm_info "name_from_id" "$identifier" >/dev/null; then
+            log_message "ERROR" "No VM found with ID: $identifier ($error_context)."
+            return 1
+        fi
+    else
+        # Validate name format
+        if ! is_valid_name "$identifier"; then
+            log_message "ERROR" "Invalid VM_NAME '$identifier' (use a-z, A-Z, 0-9, _, -) ($error_context)."
+            return 1
+        fi
+        
+        # Check if VM exists
+        if [[ ! -d "$VM_DIR/$identifier" ]]; then
+            log_message "ERROR" "VM '$identifier' does not exist ($error_context)."
+            return 1
+        fi
+    fi
+    
+    return 0
+}
+
+###############################################################################
+# UTILITY FUNCTIONS
+###############################################################################
+
+# Dispatch commands based on command tables
+# Arguments:
+#   $1 - Command table name
+#   $2 - Command to dispatch
+#   $@ - Additional arguments for the command
+# Returns:
+#   Command's return value or 1 on failure
+dispatch() {
+    local table="$1" cmd="$2"
+    shift 2
+    
+    # Get reference to command table
+    local -n cmd_table="$table"
+    local help_func="show_${table/_COMMANDS/}_help"
+    
+    # Check if command exists in table
+    if [[ -z "${cmd_table[$cmd]+x}" ]]; then
+        log_message "ERROR" "Unknown command in $table: $cmd."
+        
+        # Show help if available
+        if declare -f "$help_func" >/dev/null 2>&1; then
+            "$help_func"
+        fi
+        
+        return 1
+    fi
+    
+    # Execute command
+    "${cmd_table[$cmd]}" "$@"
+}
+
+# Generate a random MAC address in the QEMU/KVM range (52:54:00:XX:XX:XX)
+# Arguments: None
+# Returns:
+#   MAC address on success, 1 on failure
+generate_mac() {
+    # Use timestamp and RANDOM to generate a unique seed
+    local timestamp
+    if ! timestamp=$(date +%s); then
+        log_message "ERROR" "Failed to get timestamp for MAC generation."
+        return 1
+    fi
+    
+    local seed=$((RANDOM + timestamp))
+    RANDOM=$seed
+    
+    # Generate MAC address with QEMU OUI prefix
+    local mac
+    mac=$(printf "52:54:00:%02x:%02x:%02x" $((RANDOM % 256)) $((RANDOM % 256)) $((RANDOM % 256)))
+    
+    # Validate MAC format
+    if [[ ! "$mac" =~ ^([0-9a-f]{2}:){5}[0-9a-f]{2}$ ]]; then
+        log_message "ERROR" "Failed to generate valid MAC address: $mac"
+        return 1
+    fi
+    
+    echo "$mac"
+    return 0
+}\n\n================
+File: ./src/lib/qemate_net.sh
+Tokens: 1972
+================
+#!/bin/bash
+################################################################################
+# Qemate Network Module                                                        #
+#                                                                              #
+# Description: Networking functions for QEMU VMs in Qemate.                    #
+# Author: Daniel Zilli                                                         #
+# Version: 1.1.1                                                               #
+# License: BSD 3-Clause License                                                #
+# Date: March 2025                                                             #
+################################################################################
+
+################################################################################
+# INITIALIZATION                                                               #
+################################################################################
+
+# Ensure SCRIPT_DIR is set by the parent script
+if [[ -z "${SCRIPT_DIR:-}" ]]; then
+    echo "Error: SCRIPT_DIR not set." >&2
+    exit 1
+fi
+
+# Network constants
+readonly VALID_NETWORK_TYPES=("nat" "user" "none")
+readonly VALID_NETWORK_MODELS=("e1000" "virtio-net-pci")
+
+################################################################################
+# NETWORK CONFIGURATION FUNCTIONS                                              #
+################################################################################
+
+#######################################
+# Builds network command-line arguments for QEMU
+# Arguments:
+#   $1: VM name
+# Outputs:
+#   QEMU network arguments (to stdout)
+# Returns:
+#   0 on success, 1 on failure
+#######################################
+build_network_args() {
+    local name="$1"
+    local config_file="${VM_DIR}/${name}/config"
+    
+    # Validate VM exists
+    validate_vm_identifier "$name" "build_network_args" || return 1
+    
+    # Check config file exists
+    if [[ ! -f "$config_file" ]]; then
+        log_message "ERROR" "Config file for '${name}' not found."
+        return 1
+    fi
+    
+    # Source VM configuration
+    if ! source "$config_file"; then
+        log_message "ERROR" "Failed to source config for '${name}'."
+        return 1
+    fi
+
+    # Prepare network arguments
+    local net_type="${NETWORK_TYPE:-user}" 
+    local args=()
+    
+    case "$net_type" in
+        nat | user)
+            local netdev_arg="user,id=net0"
+            
+            # Add port forwarding if enabled
+            if [[ "$net_type" == "nat" && "${PORT_FORWARDING_ENABLED:-0}" -eq 1 && -n "${PORT_FORWARDS:-}" ]]; then
+                local forwards=""
+                while IFS=':' read -r host guest proto; do
+                    [[ -z "$host" ]] && continue
+                    forwards+=",hostfwd=${proto:-tcp}::${host}-:${guest}"
+                done < <(echo "${PORT_FORWARDS}" | tr ',' '\n')
+                netdev_arg+="$forwards"
+            fi
+            
+            # Add network device arguments
+            args+=("-netdev" "$netdev_arg" "-device" "${NETWORK_MODEL:-virtio-net-pci},netdev=net0,mac=${MAC_ADDRESS:-$(generate_mac)}")
+            ;;
+        none)
+            # No network device needed
+            return 0
+            ;;
+        *)
+            log_message "ERROR" "Unsupported network type: ${net_type}."
+            return 1
+            ;;
+    esac
+    
+    # Output arguments
+    printf '%s\n' "${args[@]}"
+}
+
+#######################################
+# Sets the network type for a VM
+# Arguments:
+#   $1: VM name or ID
+#   $2: Network type (nat, user, none)
+# Returns:
+#   0 on success, 1 on failure
+#######################################
+net_type_set() {
+    local name_or_id="$1" 
+    local net_type="$2"
+    local vm_name
+    
+    # Get VM name from ID if needed
+    vm_name=$(get_vm_info "name_from_id" "$name_or_id" 2>/dev/null || echo "$name_or_id") || {
+        log_message "ERROR" "No VM found: ${name_or_id}."
+        return 1
+    }
+    
+    # Validate VM identifier
+    validate_vm_identifier "$vm_name" "net_type_set" || return 1
+
+    # Check for required arguments
+    if [[ -z "$net_type" ]]; then
+        log_message "ERROR" "Network type required (nat, user, none)."
+        return 1
+    fi
+    
+    # Validate network type
+    local valid=0
+    for type in "${VALID_NETWORK_TYPES[@]}"; do
+        if [[ "$net_type" == "$type" ]]; then
+            valid=1
+            break
+        fi
+    done
+    
+    if [[ "$valid" -eq 0 ]]; then
+        log_message "ERROR" "Invalid network type: ${net_type} (use nat, user, none)."
+        return 1
+    fi
+
+    local config_file="${VM_DIR}/${vm_name}/config"
+    
+    # Check if VM is running
+    if pgrep -f "guest=${vm_name},process=qemu-${vm_name}" >/dev/null; then
+        log_message "ERROR" "Cannot modify network type while VM '${vm_name}' is running."
+        return 1
+    fi
+    
+    # Source VM configuration
+    if ! source "$config_file"; then
+        log_message "ERROR" "Failed to read config for '${vm_name}'."
+        return 1
+    fi
+
+    # Define update function for with_config_file
+    update_net_type() {
+        local temp_config="$1"
+        if grep -q "^NETWORK_TYPE=" "$temp_config"; then
+            sed -i "s/^NETWORK_TYPE=.*/NETWORK_TYPE=\"${net_type}\"/" "$temp_config"
+        else
+            echo "NETWORK_TYPE=\"${net_type}\"" >>"$temp_config"
+        fi
+    }
+    
+    # Update configuration
+    with_config_file "$config_file" update_net_type || return 1
+    log_message "SUCCESS" "Set network type for '${vm_name}' to '${net_type}'."
+}
+
+#######################################
+# Sets the network model for a VM
+# Arguments:
+#   $1: VM name or ID
+#   $2: Network model (e1000, virtio-net-pci)
+# Returns:
+#   0 on success, 1 on failure
+#######################################
+net_model_set() {
+    local name_or_id="$1" 
+    local net_model="${2:-virtio-net-pci}"
+    local vm_name
+    
+    # Get VM name from ID if needed
+    vm_name=$(get_vm_info "name_from_id" "$name_or_id" 2>/dev/null || echo "$name_or_id") || {
+        log_message "ERROR" "No VM found: ${name_or_id}."
+        return 1
+    }
+    
+    # Validate VM identifier
+    validate_vm_identifier "$vm_name" "net_model_set" || return 1
+
+    # Validate network model
+    local valid=0
+    for model in "${VALID_NETWORK_MODELS[@]}"; do
+        if [[ "$net_model" == "$model" ]]; then
+            valid=1
+            break
+        fi
+    done
+    
+    if [[ "$valid" -eq 0 ]]; then
+        log_message "ERROR" "Invalid network model: ${net_model} (use e1000, virtio-net-pci)."
+        return 1
+    fi
+
+    local config_file="${VM_DIR}/${vm_name}/config"
+    
+    # Check if VM is running
+    if pgrep -f "guest=${vm_name},process=qemu-${vm_name}" >/dev/null; then
+        log_message "ERROR" "Cannot modify network model while VM '${vm_name}' is running."
+        return 1
+    fi
+    
+    # Source VM configuration
+    if ! source "$config_file"; then
+        log_message "ERROR" "Failed to read config for '${vm_name}'."
+        return 1
+    fi
+
+    # Define update function for with_config_file
+    update_net_model() {
+        local temp_config="$1"
+        if grep -q "^NETWORK_MODEL=" "$temp_config"; then
+            sed -i "s/^NETWORK_MODEL=.*/NETWORK_MODEL=\"${net_model}\"/" "$temp_config"
+        else
+            echo "NETWORK_MODEL=\"${net_model}\"" >>"$temp_config"
+        fi
+    }
+    
+    # Update configuration
+    with_config_file "$config_file" update_net_model || return 1
+    log_message "SUCCESS" "Set network model for '${vm_name}' to '${net_model}'."
+}
+
+################################################################################
+# PORT FORWARDING MANAGEMENT FUNCTIONS                                         #
+################################################################################
+
+#######################################
+# Lists port forwards for a VM
+# Arguments:
+#   $1: VM name or ID
+# Returns:
+#   0 on success, 1 on failure
+#######################################
+net_port_list() {
+    local name_or_id="$1"
+    local vm_name
+    
+    # Validate VM identifier
+    validate_vm_identifier "$name_or_id" "net_port_list" || return 1
+    
+    # Get VM name from ID if needed
+    if [[ "$name_or_id" =~ ^[0-9]+$ ]]; then
+        vm_name=$(get_vm_info "name_from_id" "$name_or_id") || {
+            log_message "ERROR" "Failed to resolve ID '${name_or_id}' to a VM name."
+            return 1
+        }
+    else
+        vm_name="$name_or_id"
+    fi
+
+    local config_file="${VM_DIR}/${vm_name}/config"
+    
+    # Clear any existing variables
+    unset PORT_FORWARDING_ENABLED PORT_FORWARDS
+    
+    # Source VM configuration
+    if ! source "$config_file"; then
+        log_message "ERROR" "Failed to read config for '${vm_name}'."
+        return 1
+    fi
+    
+    # Check network type supports port forwarding
+    if [[ "${NETWORK_TYPE:-user}" != "user" && "${NETWORK_TYPE:-user}" != "nat" ]]; then
+        log_message "ERROR" "VM '${vm_name}' not configured for 'user' or 'nat' networking."
+        return 1
+    fi
+
+    # Display port forwards
+    printf "Port Forwards for VM '%s':\n" "$vm_name"
+    printf "=======================================\n"
+    printf "%-15s %-15s %-10s\n" "HOST PORT" "GUEST PORT" "PROTOCOL"
+    printf -- "---------------------------------------\n"
+    
+    if [[ "${PORT_FORWARDING_ENABLED:-0}" -eq 1 && -n "${PORT_FORWARDS:-}" ]]; then
+        echo "${PORT_FORWARDS}" | tr ',' '\n' | while IFS=':' read -r host guest proto; do
+            [[ -z "$host" ]] && continue
+            printf "%-15s %-15s %-10s\n" "$host" "$guest" "${proto:-tcp}"
+        done
+    else
+        printf "No port forwards configured.\n"
+    fi
+}
+
+#######################################
+# Adds a port forward to a VM
+# Arguments:
+#   $1: VM name or ID
+#   Additional arguments:
+#     --host HOST_PORT: Port on host to forward
+#     --guest GUEST_PORT: Port on guest to receive traffic
+#     --proto PROTOCOL: Protocol (tcp/udp)
+# Returns:
+#   0 on success, 1 on failure
+#######################################
+net_port_add() {
+    local name_or_id="$1" host="" guest="" proto="tcp"
+    shift
+    
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --host)
+                host="$2"
+                shift 2
+                ;;
+            --guest)
+                guest="$2"
+                shift 2
+                ;;
+            --proto)
+                proto="$2"
+                shift 2
+                ;;
+            *)
+                log_message "ERROR" "Unknown option for 'port add': $1."
+                return 1
+                ;;
+        esac
+    done
+
+    # Validate arguments
+    if [[ -z "$host" || -z "$guest" ]]; then
+        log_message "ERROR" "Both --host and --guest ports are required."
+        return 1
+    fi
+    
+    if [[ ! "$proto" =~ ^(tcp|udp)$ ]]; then
+        log_message "ERROR" "Invalid protocol: ${proto} (use tcp or udp)."
+        return 1
+    fi
+    
+    if [[ ! "$host" =~ ^[0-9]+$ || ! "$guest" =~ ^[0-9]+$ || 
+          "$host" -lt 1 || "$host" -gt 65535 || 
+          "$guest" -lt 1 || "$guest" -gt 65535 ]]; then
+        log_message "ERROR" "Ports must be numeric and between 1-65535."
+        return 1
+    fi
+
+    local vm_name
+    
+    # Get VM name from ID if needed
+    vm_name=$(get_vm_info "name_from_id" "$name_or_id" 2>/dev/null || echo "$name_or_id") || {
+        log_message "ERROR" "No VM found: ${name_or_id}."
+        return 1
+    }
+    
+    # Validate VM identifier
+    validate_vm_identifier "$vm_name" "net_port_add" || return 1
+
+    local config_file="${VM_DIR}/${vm_name}/config"
+    
+    # Check if VM is running
+    if pgrep -f "guest=${vm_name},process=qemu-${vm_name}" >/dev/null; then
+        log_message "ERROR" "Cannot modify ports while VM '${vm_name}' is running."
+        return 1
+    fi
+    
+    # Source VM configuration
+    if ! source "$config_file"; then
+        log_message "ERROR" "Failed to read config for '${vm_name}'."
+        return 1
+    fi
+    
+    # Check network type supports port forwarding
+    if [[ "${NETWORK_TYPE:-user}" != "user" && "${NETWORK_TYPE:-user}" != "nat" ]]; then
+        log_message "ERROR" "Port forwarding requires 'user' or 'nat' network type."
+        return 1
+    fi
+
+    # Check for port conflicts
+    if [[ -n "${PORT_FORWARDS:-}" ]]; then
+        while IFS=':' read -r existing_host existing_guest existing_proto; do
+            [[ -z "$existing_host" ]] && continue
+            if [[ "$existing_host" == "$host" && "${existing_proto:-tcp}" == "$proto" ]]; then
+                log_message "ERROR" "Port forward ${host} (${proto}) already exists."
+                return 1
+            fi
+            if [[ "$existing_guest" == "$guest" && "${existing_proto:-tcp}" == "$proto" ]]; then
+                log_message "ERROR" "Guest port ${guest} (${proto}) already in use."
+                return 1
+            fi
+        done < <(echo "${PORT_FORWARDS}" | tr ',' '\n')
+    fi
+
+    # Define update function for with_config_file
+    update_port_add() {
+        local temp_config="$1"
+        if grep -q "^PORT_FORWARDING_ENABLED=" "$temp_config"; then
+            sed -i "s/^PORT_FORWARDING_ENABLED=.*/PORT_FORWARDING_ENABLED=1/" "$temp_config"
+        else
+            echo "PORT_FORWARDING_ENABLED=1" >>"$temp_config"
+        fi
+        if grep -q "^PORT_FORWARDS=" "$temp_config"; then
+            sed -i "/^PORT_FORWARDS=/ s/\"$/,${host}:${guest}:${proto}\"/" "$temp_config"
+        else
+            echo "PORT_FORWARDS=\"${host}:${guest}:${proto}\"" >>"$temp_config"
+        fi
+    }
+    
+    # Update configuration
+    with_config_file "$config_file" update_port_add || return 1
+    log_message "SUCCESS" "Added port forward for '${vm_name}': ${host} -> ${guest} (${proto})."
+}
+
+#######################################
+# Removes a port forward from a VM
+# Arguments:
+#   $1: VM name or ID
+#   $2: Port specification (e.g., 8080 or 8080:tcp)
+# Returns:
+#   0 on success, 1 on failure
+#######################################
+net_port_remove() {
+    local name_or_id="$1" port_spec="$2"
+    local vm_name
+    
+    # Validate VM identifier
+    validate_vm_identifier "$name_or_id" "net_port_list" || return 1
+    
+    # Get VM name from ID if needed
+    if [[ "$name_or_id" =~ ^[0-9]+$ ]]; then
+        vm_name=$(get_vm_info "name_from_id" "$name_or_id") || {
+            log_message "ERROR" "Failed to resolve ID '${name_or_id}' to a VM name."
+            return 1
+        }
+    else
+        vm_name="$name_or_id"
+    fi
+
+    # Check for required port specification
+    if [[ -z "$port_spec" ]]; then
+        log_message "ERROR" "Port specification (e.g., 8080 or 8080:proto) required."
+        return 1
+    fi
+    
+    # Parse port and protocol
+    local port proto="tcp"
+    if [[ "$port_spec" =~ : ]]; then
+        IFS=':' read -r port proto <<<"$port_spec"
+    else
+        port="$port_spec"
+    fi
+    
+    # Validate port and protocol
+    if [[ ! "$port" =~ ^[0-9]+$ || "$port" -lt 1 || "$port" -gt 65535 ]]; then
+        log_message "ERROR" "Port must be numeric and between 1-65535."
+        return 1
+    fi
+    
+    if [[ ! "$proto" =~ ^(tcp|udp)$ ]]; then
+        log_message "ERROR" "Invalid protocol: ${proto} (use tcp or udp)."
+        return 1
+    fi
+
+    local config_file="${VM_DIR}/${vm_name}/config"
+    
+    # Check if VM is running
+    if pgrep -f "guest=${vm_name},process=qemu-${vm_name}" >/dev/null; then
+        log_message "ERROR" "Cannot modify ports while VM '${vm_name}' is running."
+        return 1
+    fi
+    
+    # Source VM configuration
+    if ! source "$config_file"; then
+        log_message "ERROR" "Failed to read config for '${vm_name}'."
+        return 1
+    fi
+    
+    # Check network type supports port forwarding
+    if [[ "${NETWORK_TYPE:-user}" != "user" && "${NETWORK_TYPE:-user}" != "nat" ]]; then
+        log_message "ERROR" "Port forwarding requires 'user' or 'nat' network type."
+        return 1
+    fi
+    
+    # Check if port forwarding is enabled
+    if [[ "${PORT_FORWARDING_ENABLED:-0}" -ne 1 || -z "${PORT_FORWARDS:-}" ]]; then
+        log_message "ERROR" "No port forwards configured for '${vm_name}'."
+        return 1
+    fi
+
+    # Scan for matching ports
+    local new_forwards="" found=0 match_type="" ambiguous=0 temp_forwards=""
+    while IFS=':' read -r host guest existing_proto; do
+        [[ -z "$host" ]] && continue
+        local proto_match=$([[ "${existing_proto:-tcp}" == "$proto" ]] && echo 1 || echo 0)
+        
+        if [[ "$host" == "$port" && "$proto_match" -eq 1 ]]; then
+            found=1
+            match_type="host"
+        elif [[ "$guest" == "$port" && "$proto_match" -eq 1 ]]; then
+            found=1
+            match_type="guest"
+        elif [[ "$host" == "$port" || "$guest" == "$port" ]] && [[ "$proto_match" -eq 0 ]]; then
+            ambiguous=1
+            temp_forwards+="${host}:${guest}:${existing_proto:-tcp},"
+        else
+            [[ -n "$new_forwards" ]] && new_forwards+=","
+            new_forwards+="${host}:${guest}:${existing_proto:-tcp}"
+        fi
+    done < <(echo "${PORT_FORWARDS}" | tr ',' '\n')
+
+    # Handle port match outcomes
+    if [[ "$found" -eq 0 && "$ambiguous" -eq 1 ]]; then
+        log_message "ERROR" "Port ${port} matches multiple protocols (tcp/udp). Specify with ${port}:proto."
+        return 1
+    elif [[ "$found" -eq 0 ]]; then
+        log_message "ERROR" "Port forward ${port} (${proto}) not found in host or guest mappings."
+        return 1
+    fi
+
+    # Rebuild port forwards list excluding the matched entry
+    new_forwards=""
+    while IFS=':' read -r host guest existing_proto; do
+        [[ -z "$host" ]] && continue
+        local proto_match=$([[ "${existing_proto:-tcp}" == "$proto" ]] && echo 1 || echo 0)
+        
+        if [[ "$match_type" == "host" && "$host" == "$port" && "$proto_match" -eq 1 ]] || \
+           [[ "$match_type" == "guest" && "$guest" == "$port" && "$proto_match" -eq 1 ]]; then
+            continue
+        fi
+        
+        [[ -n "$new_forwards" ]] && new_forwards+=","
+        new_forwards+="${host}:${guest}:${existing_proto:-tcp}"
+    done < <(echo "${PORT_FORWARDS}" | tr ',' '\n')
+
+    # Define update function for with_config_file
+    update_port_remove() {
+        local temp_config="$1"
+        if [[ -z "$new_forwards" ]]; then
+            sed -i "s/^PORT_FORWARDING_ENABLED=.*/PORT_FORWARDING_ENABLED=0/" "$temp_config"
+            sed -i "s/^PORT_FORWARDS=.*/PORT_FORWARDS=\"\"/" "$temp_config"
+        else
+            sed -i "s/^PORT_FORWARDS=.*/PORT_FORWARDS=\"${new_forwards}\"/" "$temp_config"
+        fi
+    }
+    
+    # Update configuration
+    with_config_file "$config_file" update_port_remove || return 1
+    log_message "SUCCESS" "Removed port forward for '${vm_name}': ${port} (${proto}) from ${match_type} port."
+}\n\n================
+File: ./tests/run_tests.sh
+Tokens: 8
+================
+#!/bin/bash
+# Run all BATS tests
+bats tests/qemate_tests.bats\n\n================
+File: ./tests/qemate_tests.bats
+Tokens: 891
+================
+#!/usr/bin/env bats
+
+setup() {
+  export QEMATE_TEST_MODE=1
+  export HOME="$BATS_TMPDIR/home"
+  export VM_DIR="$HOME/QVMs"
+  export LOG_DIR="$HOME/QVMs/logs"
+  export TEMP_DIR="$HOME/QVMs/tmp"
+
+  rm -rf "$HOME" "$BATS_TEST_DIRNAME/mocks" 2>/dev/null
+  mkdir -p "$VM_DIR" "$LOG_DIR" "$TEMP_DIR"
+  mkdir -p "$BATS_TEST_DIRNAME/mocks"
+
+  # Mock qemu-system-x86_64
+  cat << 'EOF' > "$BATS_TEST_DIRNAME/mocks/qemu-system-x86_64"
+#!/bin/bash
+echo "qemu-system-x86_64 mock called with $@"
+vm_name=$(echo "$@" | grep -o "guest=[^,]*" | cut -d"=" -f2)
+[[ -n "$vm_name" ]] || vm_name="testvm"
+mkdir -p "$TEMP_DIR/qemu-$vm_name.lock"
+echo $$ > "$TEMP_DIR/qemu-$vm_name.lock/pid"
+touch "$TEMP_DIR/qemu_running_$vm_name"
+touch "$TEMP_DIR/qemu-$vm_name.started"
+mkdir -p "$VM_DIR/$vm_name"
+cat << 'CONFIG' > "$VM_DIR/$vm_name/config"
+ID=1
+NAME="$vm_name"
+MACHINE_TYPE="q35"
+CORES=2
+MEMORY="2G"
+CPU_TYPE="host"
+ENABLE_KVM=1
+NETWORK_TYPE="user"
+NETWORK_MODEL="virtio-net-pci"
+MAC_ADDRESS="52:54:00:12:34:56"
+QEMU_ARGS="-machine type=q35,accel=kvm -cpu host,migratable=off -smp cores=2,threads=1 -m 2G"
+CONFIG
+chmod 600 "$VM_DIR/$vm_name/config"
+echo "virtual size: 20G" > "$VM_DIR/$vm_name/disk.qcow2.info"
+exit 0
+EOF
+  chmod +x "$BATS_TEST_DIRNAME/mocks/qemu-system-x86_64"
+
+  # Mock pgrep
+  cat << 'EOF' > "$BATS_TEST_DIRNAME/mocks/pgrep"
+#!/bin/bash
+if [[ "$1" == "-f" ]]; then
+  pattern="$2"
+  vm_name=$(echo "$pattern" | grep -o "guest=[^,]*" | cut -d"=" -f2)
+  [[ -n "$vm_name" ]] || vm_name="testvm"
+  if [[ -f "$TEMP_DIR/qemu_running_$vm_name" ]]; then
+    echo 1234
+    exit 0
+  else
+    exit 1
+  fi
+fi
+EOF
+  chmod +x "$BATS_TEST_DIRNAME/mocks/pgrep"
+
+  # Mock qemu-img
+  cat << 'EOF' > "$BATS_TEST_DIRNAME/mocks/qemu-img"
+#!/bin/bash
+if [[ "$1" == "create" ]]; then
+  touch "$4"
+  exit 0
+elif [[ "$1" == "check" ]]; then
+  exit 0
+elif [[ "$1" == "info" ]]; then
+  echo "virtual size: 20G (21474836480 bytes)"
+  echo "disk size: 196K"
+  exit 0
+fi
+EOF
+  chmod +x "$BATS_TEST_DIRNAME/mocks/qemu-img"
+
+  # Mock ss
+  cat << 'EOF' > "$BATS_TEST_DIRNAME/mocks/ss"
+#!/bin/bash
+exit 0
+EOF
+  chmod +x "$BATS_TEST_DIRNAME/mocks/ss"
+
+  # Mock xset
+  cat << 'EOF' > "$BATS_TEST_DIRNAME/mocks/xset"
+#!/bin/bash
+exit 1
+EOF
+  chmod +x "$BATS_TEST_DIRNAME/mocks/xset"
+
+  function kill() {
+    local signal="$1"
+    local pid="$2"
+    if [[ "$signal" == "-0" ]]; then
+      [ -f "$TEMP_DIR/qemu_running_testvm" ] && return 0 || return 1
+    else
+      echo "Mock kill called with $@" >&2
+      rm -f "$TEMP_DIR/qemu_running_testvm"
+      return 0
+    fi
+  }
+  export -f kill
+
+  export PATH="$BATS_TEST_DIRNAME/mocks:$PATH"
+  export SCRIPT_DIR="$BATS_TEST_DIRNAME/.."
+  export LIB_DIR="$SCRIPT_DIR/src/lib"
+}
+
+teardown() {
+  unset QEMATE_TEST_MODE HOME VM_DIR LOG_DIR TEMP_DIR SCRIPT_DIR LIB_DIR
+  rm -rf "$BATS_TEST_DIRNAME/mocks" "$HOME"
+}
+
+load_utils() {
+  for file in "$LIB_DIR/qemate_utils.sh" "$LIB_DIR/qemate_net.sh" "$LIB_DIR/qemate_vm.sh"; do
+    [ -f "$file" ] || { echo "Error: $file not found" >&2; exit 1; }
+    source "$file"
+  done
+}
+
+@test "vm_create creates a VM with default settings" {
+  load_utils
+  run vm_create "testvm"
+  [ "$status" -eq 0 ]
+  [ -d "$VM_DIR/testvm" ]
+  [ -f "$VM_DIR/testvm/config" ]
+  [ -f "$VM_DIR/testvm/disk.qcow2" ]
+  grep -q "MACHINE_TYPE=\"q35\"" "$VM_DIR/testvm/config"
+  grep -q "CORES=2" "$VM_DIR/testvm/config"
+  grep -q "MEMORY=\"2G\"" "$VM_DIR/testvm/config"
+}
+
+@test "vm_create fails with invalid name" {
+  load_utils
+  run vm_create "invalid;name"
+  [ "$status" -eq 1 ]
+  [ ! -d "$VM_DIR/invalid;name" ]
+  [[ "$output" =~ "Invalid VM name" ]]
+}
+
+@test "vm_create with custom options" {
+  load_utils
+  run vm_create "testvm" --memory 4G --cores 4 --disk-size 40G
+  [ "$status" -eq 0 ]
+  [ -d "$VM_DIR/testvm" ]
+  [ -f "$VM_DIR/testvm/disk.qcow2" ]
+  grep -q "MEMORY=\"4G\"" "$VM_DIR/testvm/config"
+  grep -q "CORES=4" "$VM_DIR/testvm/config"
+}
+
+@test "vm_start starts a VM" {
+  load_utils
+  vm_create "testvm"
+  run vm_start "testvm" --headless
+  echo "Output: $output" >&2
+  [ "$status" -eq 0 ]
+  [ -f "$TEMP_DIR/qemu-testvm.started" ]
+  [ -f "$TEMP_DIR/qemu-testvm.lock/pid" ]
+  run pgrep -f "guest=testvm,process=qemu-testvm"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ 1234 ]]
+}
+
+@test "vm_start fails if VM already running" {
+  load_utils
+  vm_create "testvm"
+  vm_start "testvm" --headless
+  run vm_start "testvm" --headless
+  [ "$status" -eq 1 ]
+  [[ "$output" =~ "already running" ]]
+}
+
+@test "vm_stop stops a running VM" {
+  load_utils
+  vm_create "testvm"
+  vm_start "testvm" --headless
+  [ -f "$TEMP_DIR/qemu_running_testvm" ]
+  run vm_stop "testvm"
+  [ "$status" -eq 0 ]
+  [ ! -f "$TEMP_DIR/qemu_running_testvm" ]
+}
+
+@test "vm_stop does nothing if VM not running" {
+  load_utils
+  vm_create "testvm"
+  run vm_stop "testvm"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "not running" ]]
+}
+
+@test "vm_delete removes a stopped VM" {
+  load_utils
+  vm_create "testvm"
+  run bash -c "source $LIB_DIR/qemate_utils.sh; source $LIB_DIR/qemate_vm.sh; vm_delete 'testvm' --force"
+  [ "$status" -eq 0 ]
+  [ ! -d "$VM_DIR/testvm" ]
+}
+
+@test "vm_delete fails if VM is running without force" {
+  load_utils
+  vm_create "testvm"
+  vm_start "testvm" --headless
+  run bash -c "source $LIB_DIR/qemate_utils.sh; source $LIB_DIR/qemate_vm.sh; vm_delete 'testvm'"
+  [ "$status" -eq 1 ]
+  [ -d "$VM_DIR/testvm" ]
+  [[ "$output" =~ "is running" ]]
+}
+
+@test "vm_list shows VMs" {
+  load_utils
+  vm_create "testvm1"
+  vm_create "testvm2"
+  run vm_list
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "testvm1" ]]
+  [[ "$output" =~ "testvm2" ]]
+}
+
+@test "vm_status shows VM details" {
+  load_utils
+  vm_create "testvm"
+  run vm_status "testvm"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "VM Status: testvm" ]]
+  [[ "$output" =~ "stopped" ]]
+}
+
+@test "net_port_add adds a port forward" {
+  load_utils
+  vm_create "testvm"
+  run net_port_add "testvm" --host 8080 --guest 80
+  [ "$status" -eq 0 ]
+  grep -q "PORT_FORWARDING_ENABLED=1" "$VM_DIR/testvm/config"
+  grep -q "PORT_FORWARDS=\"8080:80:tcp\"" "$VM_DIR/testvm/config"
+}
+
+@test "net_port_add fails if VM is running" {
+  load_utils
+  vm_create "testvm"
+  vm_start "testvm" --headless
+  run net_port_add "testvm" --host 8080 --guest 80
+  [ "$status" -eq 1 ]
+  [[ "$output" =~ "is running" ]]
+}
+
+@test "net_port_remove removes a port forward" {
+  load_utils
+  vm_create "testvm"
+  net_port_add "testvm" --host 8080 --guest 80
+  run net_port_remove "testvm" "8080"
+  [ "$status" -eq 0 ]
+  ! grep -q "PORT_FORWARDS=" "$VM_DIR/testvm/config"
+}
+
+@test "net_type_set changes network type" {
+  load_utils
+  vm_create "testvm"
+  run net_type_set "testvm" "nat"
+  [ "$status" -eq 0 ]
+  grep -q "NETWORK_TYPE=\"nat\"" "$VM_DIR/testvm/config"
+}
+
+@test "net_model_set changes network model" {
+  load_utils
+  vm_create "testvm"
+  run net_model_set "testvm" "virtio-net-pci"
+  [ "$status" -eq 0 ]
+  grep -q "NETWORK_MODEL=\"virtio-net-pci\"" "$VM_DIR/testvm/config"
+}
+
+@test "net_port_list shows port forwards" {
+  load_utils
+  vm_create "testvm"
+  net_port_add "testvm" --host 8080 --guest 80
+  run net_port_list "testvm"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "8080" ]]
+  [[ "$output" =~ "80" ]]
+  [[ "$output" =~ "tcp" ]]
+}\n\n================
+File: ./Makefile
+Tokens: 144
+================
+# Qemate Makefile
+
+# Default installation paths
+PREFIX ?= /usr/local
+BINDIR ?= $(PREFIX)/bin
+LIBDIR ?= $(PREFIX)/share/qemate
+DOCDIR ?= $(PREFIX)/share/doc/qemate
+MANDIR ?= $(PREFIX)/share/man/man1
+COMPLETIONDIR ?= $(PREFIX)/share/bash-completion/completions
+
+# No build step needed for Bash scripts
+all:
+	@echo "Nothing to build. Use 'make install' to install Qemate."
+
+install:
+	@echo "Installing Qemate..."
+	@install -d $(DESTDIR)$(BINDIR)
+	@install -d $(DESTDIR)$(LIBDIR)
+	@install -d $(DESTDIR)$(DOCDIR)
+	@install -d $(DESTDIR)$(MANDIR)
+	@install -d $(DESTDIR)$(COMPLETIONDIR)
+	
+	# Install main script
+	@install -m 755 src/qemate.sh $(DESTD IR)$(BINDIR)/qemate
+	
+	# Install library files
+	@for lib in src/lib/*.sh; do \
+		install -m 644 $$lib $(DESTDIR)$(LIBDIR)/; \
+	done
+	
+	# Install documentation
+	@install -m 644 README.md $(DESTDIR)$(DOCDIR)/
+	@install -m 644 CHANGELOG.md $(DESTDIR)$(DOCDIR)/
+	@install -m 644 LICENSE $(DESTDIR)$(DOCDIR)/
+	@install -m 644 docs/man/qemate.1 $(DESTDIR)$(MANDIR)/
+	
+	# Install bash completion
+	@install -m 644 completion/bash/qemate $(DESTDIR)$(COMPLETIONDIR)/
+
+uninstall:
+	@echo "Running uninstall script..."
+	@./uninstall.sh
+
+test:
+	@echo "Running tests..."
+	@./tests/run_tests.sh
+
+clean:
+	@echo "Nothing to clean."
+
+.PHONY: all install uninstall test clean\n\n================
+File: ./completion/bash/qemate
+Tokens: 456
+================
+#!/bin/bash
+################################################################################
+# Qemate Bash Completion Script                                                #
+# Provides tab completion for Qemate commands, subcommands, and options        #
+################################################################################
+
+_qemate_completion() {
+    local cur prev words cword
+    _init_completion || return
+
+    # Qemate base directory for VMs
+    local VM_DIR="${HOME}/QVMs"
+
+    # Main commands
+    local commands="vm net --help --version"
+
+    # Subcommands
+    local vm_subcommands="create start stop status delete list"
+    local net_subcommands="port type"
+    local net_port_subcommands="list add remove"
+    local net_type_subcommands="set"
+
+    # Options for various commands
+    local vm_create_opts="--memory --cores --disk-size --machine --iso"
+    local vm_start_opts="--iso --headless"
+    local vm_stop_opts="--force"
+    local vm_delete_opts="--force"
+    local net_port_add_opts="--host --guest --proto"
+
+    # Helper function to get VM names
+    _get_vm_names() {
+        if [[ -d "$VM_DIR" ]]; then
+            find "$VM_DIR" -maxdepth 1 -type d -not -path "$VM_DIR" -exec basename {} \; 2>/dev/null
+        fi
+    }
+
+    # First level: Main commands
+    if [[ "$cword" -eq 1 ]]; then
+        COMPREPLY=($(compgen -W "$commands" -- "$cur"))
+        return
+    fi
+
+    # Second level: Subcommands and options
+    case "${words[1]}" in
+        vm)
+            if [[ "$cword" -eq 2 ]]; then
+                COMPREPLY=($(compgen -W "$vm_subcommands" -- "$cur"))
+            else
+                case "${words[2]}" in
+                    create)
+                        if [[ "$cword" -eq 3 ]]; then
+                            COMPREPLY=($(compgen -W "" -- "$cur"))  # VM name free text
+                        else
+                            COMPREPLY=($(compgen -W "$vm_create_opts" -- "$cur"))
+                            if [[ "$prev" == "--iso" ]]; then
+                                COMPREPLY=($(compgen -f -X '!*.iso' -- "$cur"))
+                            elif [[ "$prev" == "--machine" ]]; then
+                                COMPREPLY=($(compgen -W "q35 pc" -- "$cur"))
+                            fi
+                        fi
+                        ;;
+                    start|stop|status|delete)
+                        if [[ "$cword" -eq 3 ]]; then
+                            COMPREPLY=($(compgen -W "$(_get_vm_names)" -- "$cur"))
+                        elif [[ "${words[2]}" == "start" ]]; then
+                            COMPREPLY=($(compgen -W "$vm_start_opts" -- "$cur"))
+                            if [[ "$prev" == "--iso" ]]; then
+                                COMPREPLY=($(compgen -f -X '!*.iso' -- "$cur"))
+                            fi
+                        elif [[ "${words[2]}" == "stop" ]]; then
+                            COMPREPLY=($(compgen -W "$vm_stop_opts" -- "$cur"))
+                        elif [[ "${words[2]}" == "delete" ]]; then
+                            COMPREPLY=($(compgen -W "$vm_delete_opts" -- "$cur"))
+                        fi
+                        ;;
+                    list)
+                        COMPREPLY=()
+                        ;;
+                esac
+            fi
+            ;;
+        net)
+            if [[ "$cword" -eq 2 ]]; then
+                COMPREPLY=($(compgen -W "$net_subcommands" -- "$cur"))
+            else
+                case "${words[2]}" in
+                    port)
+                        if [[ "$cword" -eq 3 ]]; then
+                            COMPREPLY=($(compgen -W "$net_port_subcommands" -- "$cur"))
+                        else
+                            case "${words[3]}" in
+                                list)
+                                    if [[ "$cword" -eq 4 ]]; then
+                                        COMPREPLY=($(compgen -W "$(_get_vm_names)" -- "$cur"))
+                                    fi
+                                    ;;
+                                add)
+                                    if [[ "$cword" -eq 4 ]]; then
+                                        COMPREPLY=($(compgen -W "$(_get_vm_names)" -- "$cur"))
+                                    else
+                                        COMPREPLY=($(compgen -W "$net_port_add_opts" -- "$cur"))
+                                        if [[ "$prev" == "--proto" ]]; then
+                                            COMPREPLY=($(compgen -W "tcp udp" -- "$cur"))
+                                        fi
+                                    fi
+                                    ;;
+                                remove)
+                                    if [[ "$cword" -eq 4 ]]; then
+                                        COMPREPLY=($(compgen -W "$(_get_vm_names)" -- "$cur"))
+                                    fi
+                                    ;;
+                            esac
+                        fi
+                        ;;
+                    type)
+                        if [[ "$cword" -eq 3 ]]; then
+                            COMPREPLY=($(compgen -W "$net_type_subcommands" -- "$cur"))
+                        elif [[ "${words[3]}" == "set" && "$cword" -eq 4 ]]; then
+                            COMPREPLY=($(compgen -W "$(_get_vm_names)" -- "$cur"))
+                        elif [[ "${words[3]}" == "set" && "$cword" -eq 5 ]]; then
+                            COMPREPLY=($(compgen -W "nat user none" -- "$cur"))
+                        fi
+                        ;;
+                esac
+            fi
+            ;;
+        --help|--version)
+            COMPREPLY=()
+            ;;
+    esac
+
+    return 0
+}
+
+# Register the completion function
+complete -F _qemate_completion qemate\n\n

@@ -1,0 +1,211 @@
+.TH QEMATE 1 "April 04, 2025" "Qemate 1.1.1" "User Commands"
+.SH NAME
+qemate \- Manage QEMU virtual machines from the command line
+.SH SYNOPSIS
+.B qemate
+.I COMMAND
+[
+.I SUBCOMMAND
+] [
+.I OPTIONS
+]
+.SH DESCRIPTION
+.B Qemate
+is a streamlined command-line utility designed to simplify the management of QEMU virtual machines (VMs). It provides an intuitive interface for creating, starting, stopping, and deleting VMs, as well as configuring their networking. Qemate leverages QEMU with KVM acceleration for enhanced performance when supported by the host system.
+
+Qemate requires
+.B QEMU
+(version 9.0.0 or higher) and Bash (version 4.0 or higher) to be installed. Many commands accept either the VM name or its ID, which can be obtained from the `vm list` command output.
+.SH COMMANDS
+.SS "vm - Manage Virtual Machines"
+.TP
+.B create
+qemate vm create
+.I NAME
+[
+.I OPTIONS
+]
+.br
+Create a new VM with the specified name.
+
+Options:
+.RS
+.TP
+.B --memory VALUE
+Memory size (e.g., 4G, 2048M; default: 2G)
+.TP
+.B --cores VALUE
+Number of CPU cores (default: 2)
+.TP
+.B --disk-size VALUE
+Disk size (e.g., 20G, 1024M; default: 20G)
+.TP
+.B --machine VALUE
+Machine type (e.g., q35, pc; default: q35)
+.TP
+.B --iso PATH
+Path to an ISO file to start the VM with
+.RE
+.TP
+.B start
+qemate vm start
+.I NAME_OR_ID
+[
+.I OPTIONS
+]
+.br
+Start the VM with the given name or ID.
+
+Options:
+.RS
+.TP
+.B --iso PATH
+Path to an ISO file for installation
+.TP
+.B --headless
+Run without a graphical console
+.TP
+.B --extra-args "QEMU_OPTIONS"
+Additional QEMU command-line arguments (e.g., "-cpu host,+avx512")
+.RE
+.TP
+.B stop
+qemate vm stop
+.I NAME_OR_ID
+[
+.B --force
+]
+.br
+Stop the VM. Use --force to terminate immediately if graceful shutdown fails.
+.TP
+.B status
+qemate vm status
+.I NAME_OR_ID
+.br
+Display the detailed status of the VM (e.g., state, memory, disk usage).
+.TP
+.B delete
+qemate vm delete
+.I NAME_OR_ID
+[
+.B --force
+]
+.br
+Delete the VM and its associated files. Use --force to skip confirmation and stop a running VM.
+.TP
+.B list
+qemate vm list
+.br
+List all VMs with details (ID, name, status, memory, cores, disk size).
+.TP
+.B wizard
+qemate vm wizard
+.br
+Interactively create a new VM by prompting for configuration options.
+.TP
+.B edit
+qemate vm edit
+.I NAME_OR_ID
+.br
+Edit the VM's configuration file using the default editor (e.g., nano).
+.SS "net - Configure Networking"
+.TP
+.B port
+Manage port forwards (VM must be stopped).
+.RS
+.TP
+.B list NAME_OR_ID
+List all port forwards for the VM.
+.TP
+.B add NAME_OR_ID --host PORT --guest PORT [--proto PROTO]
+Add a port forward (e.g., --host 8080 --guest 80 --proto tcp).
+.TP
+.B remove NAME_OR_ID PORT[:PROTO]
+Remove a port forward (e.g., 8080:tcp).
+.RE
+.TP
+.B set
+qemate net set
+.I NAME_OR_ID
+.I {nat|user|none}
+.br
+Set the network type for the VM (default: user).
+.TP
+.B model
+qemate net model
+.I NAME_OR_ID
+[
+.I {e1000|virtio-net-pci}
+]
+.br
+Set the network device model (default: virtio-net-pci).
+.SS "help - Display Help"
+.TP
+.B help
+qemate help
+.br
+Display the main help message. Use `qemate COMMAND help` for command-specific help.
+.SS "version - Show Version"
+.TP
+.B version
+qemate version
+.br
+Display the program version (1.1.1).
+.SH EXAMPLES
+Create a VM with 4GB memory and 4 cores:
+.EX
+qemate vm create myvm --memory 4G --cores 4
+.EE
+Start a VM with an ISO in headless mode:
+.EX
+qemate vm start myvm --iso /path/to/install.iso --headless
+.EE
+Start a VM with custom QEMU arguments:
+.EX
+qemate vm start myvm --extra-args "-cpu host,+avx512"
+.EE
+Interactively create a VM:
+.EX
+qemate vm wizard
+.EE
+Edit a VM's configuration:
+.EX
+qemate vm edit myvm
+.EE
+Add a port forward:
+.EX
+qemate net port add myvm --host 8080 --guest 80
+.EE
+Set network type to NAT:
+.EX
+qemate net set myvm nat
+.EE
+List all VMs:
+.EX
+qemate vm list
+.EE
+Show version:
+.EX
+qemate version
+.EE
+.SH FILES
+.TP
+.I ~/QVMs/VM_NAME/config
+Configuration file for each VM.
+.TP
+.I ~/QVMs/VM_NAME/disk.qcow2
+Disk image for each VM.
+.TP
+.I ~/QVMs/logs/qemate.log
+Global log file for Qemate operations.
+.SH EXIT STATUS
+.TP
+0
+Success
+.TP
+1
+Failure
+.SH AUTHOR
+Daniel Zilli
+.SH LICENSE
+BSD 3-Clause License
