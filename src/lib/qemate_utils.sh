@@ -43,11 +43,14 @@ readonly REQUIRED_COMMANDS=("qemu-system-x86_64" "qemu-img" "pgrep" "mktemp" "fi
 
 # Logging setup
 declare -A LOG_LEVELS=([DEBUG]=0 [INFO]=1 [WARNING]=2 [ERROR]=3)
-readonly COLOR_INFO="\033[0;32m" 
-readonly COLOR_SUCCESS="\033[0;32m" 
-readonly COLOR_WARNING="\033[1;33m" 
-readonly COLOR_ERROR="\033[0;31m" 
-readonly COLOR_RESET="\033[0m"
+
+# Terminal color definitions
+readonly COLOR_INFO='\033[0;34m'     # Blue
+readonly COLOR_SUCCESS='\033[0;32m'  # Green
+readonly COLOR_WARNING='\033[0;33m'  # Yellow
+readonly COLOR_ERROR='\033[0;31m'    # Red
+readonly COLOR_RESET='\033[0m'       # Reset
+
 : "${LOG_LEVEL:=INFO}" "${DEBUG:=0}"
 
 # VM cache
