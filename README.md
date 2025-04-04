@@ -148,4 +148,4 @@ Developed by Daniel Zilli.
 
 ## Version
 
-Current version: 1.1.0 (March 2025)
+Current version: 1.1.1 (April 2025)
