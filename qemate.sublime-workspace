@@ -319,6 +319,72 @@
 	},
 	"buffers":
 	[
+		{
+			"file": "gitignore",
+			"settings":
+			{
+				"buffer_size": 1369,
+				"encoding": "UTF-8",
+				"line_ending": "Unix"
+			},
+			"undo_stack":
+			[
+				[
+					10,
+					1,
+					"",
+					null,
+					"AgAAADgFAAAAAAAARgUAAAAAAAAAAAAARgUAAAAAAABGBQAAAAAAAEgAAABFbmQgb2YgaHR0cHM6Ly93d3cudG9wdGFsLmNvbS9kZXZlbG9wZXJzL2dpdGlnbm9yZS9hcGkvbGludXgsc3VibGltZXRleHQ",
+					"AQAAAAAAAAABAAAAOAUAAAAAAACABQAAAAAAAAAAAAAAAPC/"
+				],
+				[
+					11,
+					1,
+					"insert",
+					{
+						"characters": "\n"
+					},
+					"AQAAAEYFAAAAAAAARwUAAAAAAAAAAAAA",
+					"AQAAAAAAAAABAAAARgUAAAAAAABGBQAAAAAAAAAAAAAAAPC/"
+				],
+				[
+					13,
+					1,
+					"",
+					null,
+					"AQAAAEcFAAAAAAAAUwUAAAAAAAAAAAAA",
+					"AQAAAAAAAAABAAAARwUAAAAAAABHBQAAAAAAAAAAAAAAAPC/"
+				],
+				[
+					16,
+					1,
+					"insert",
+					{
+						"characters": " fiel"
+					},
+					"BQAAAEYFAAAAAAAARwUAAAAAAAAAAAAARwUAAAAAAABIBQAAAAAAAAAAAABIBQAAAAAAAEkFAAAAAAAAAAAAAEkFAAAAAAAASgUAAAAAAAAAAAAASgUAAAAAAABLBQAAAAAAAAAAAAA",
+					"AQAAAAAAAAABAAAARgUAAAAAAABGBQAAAAAAAAAAAAAAAPC/"
+				],
+				[
+					17,
+					2,
+					"left_delete",
+					null,
+					"AgAAAEoFAAAAAAAASgUAAAAAAAABAAAAbEkFAAAAAAAASQUAAAAAAAABAAAAZQ",
+					"AQAAAAAAAAABAAAASwUAAAAAAABLBQAAAAAAAAAAAAAAAPC/"
+				],
+				[
+					18,
+					1,
+					"insert",
+					{
+						"characters": "le"
+					},
+					"AgAAAEkFAAAAAAAASgUAAAAAAAAAAAAASgUAAAAAAABLBQAAAAAAAAAAAAA",
+					"AQAAAAAAAAABAAAASQUAAAAAAABJBQAAAAAAAAAAAAAAAPC/"
+				]
+			]
+		}
 	],
 	"build_system": "",
 	"build_system_choices":
@@ -789,6 +855,36 @@
 		{
 			"sheets":
 			[
+				{
+					"buffer": 0,
+					"file": "gitignore",
+					"selected": true,
+					"semi_transient": false,
+					"settings":
+					{
+						"buffer_size": 1369,
+						"regions":
+						{
+						},
+						"selection":
+						[
+							[
+								1355,
+								1355
+							]
+						],
+						"settings":
+						{
+							"syntax": "Packages/Git Formats/Git Ignore.sublime-syntax"
+						},
+						"translation.x": 0.0,
+						"translation.y": 204.0,
+						"zoom_level": 1.0
+					},
+					"stack_index": 0,
+					"stack_multiselect": false,
+					"type": "text"
+				}
 			]
 		}
 	],
