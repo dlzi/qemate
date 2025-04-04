@@ -145,7 +145,3 @@ Qemate is released under the [BSD 3-Clause License](LICENSE).
 ## Author
 
 Developed by Daniel Zilli.
-
-## Version
-
-Current version: 1.1.1 (April 2025)

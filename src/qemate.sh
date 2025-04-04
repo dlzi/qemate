@@ -5,7 +5,7 @@
 # Description: A streamlined command-line tool for managing QEMU virtual       #
 #              machines with support for creation, control, and networking.    #
 # Author: Daniel Zilli                                                         #
-# Version: 1.1.0                                                               #
+# Version: 1.1.1                                                               #
 # License: BSD 3-Clause License                                                #
 # Date: April 2025                                                             #
 ################################################################################
@@ -99,98 +99,149 @@ declare -A NET_MODEL_COMMANDS=(
 
 # Main help display function
 show_main_help() {
-    printf "%bQemate %s - QEMU Virtual Machine Manager%b\n\n" "${COLOR_INFO}" "${VERSION}" "${COLOR_RESET}"
-    printf "%bUsage:%b\n" "${COLOR_WARNING}" "${COLOR_RESET}"
-    printf "  qemate COMMAND [SUBCOMMAND] [OPTIONS]\n\n"
-    printf "%bCommands:%b\n" "${COLOR_WARNING}" "${COLOR_RESET}"
-    printf "  %bvm%b      Manage virtual machines.\n" "${COLOR_SUCCESS}" "${COLOR_RESET}"
-    printf "  %bnet%b     Configure networking.\n" "${COLOR_SUCCESS}" "${COLOR_RESET}"
-    printf "  %bhelp%b    Show this help or command-specific help.\n" "${COLOR_SUCCESS}" "${COLOR_RESET}"
-    printf "  %bversion%b Show the program version.\n\n" "${COLOR_SUCCESS}" "${COLOR_RESET}"
-    printf "%bExamples:%b\n" "${COLOR_WARNING}" "${COLOR_RESET}"
-    printf "  qemate vm create myvm --memory 4G --cores 4\n"
-    printf "  qemate net port add myvm --host 8080 --guest 80\n\n"
-    printf "Run '%bqemate COMMAND help%b' for more details.\n" "${COLOR_SUCCESS}" "${COLOR_RESET}"
+    cat <<EOF
+Qemate ${VERSION} - QEMU Virtual Machine Manager
+
+Usage:
+  qemate COMMAND [SUBCOMMAND] [OPTIONS]
+
+Commands:
+  vm        Manage virtual machines.
+  net       Configure networking.
+  help      Show this help or command-specific help.
+  version   Show the program version.
+
+Examples:
+  qemate vm create myvm --memory 4G --cores 4
+  qemate net port add myvm --host 8080 --guest 80
+
+Run 'qemate COMMAND help' for more details.
+EOF
 }
+
 
 # VM command help display
 show_vm_help() {
-    printf "%bQemate VM Command Help%b\n\n" "${COLOR_INFO}" "${COLOR_RESET}"
-    printf "%bUsage:%b\n" "${COLOR_WARNING}" "${COLOR_RESET}"
-    printf "  qemate vm SUBCOMMAND [OPTIONS]\n\n"
-    printf "%bSubcommands:%b\n" "${COLOR_WARNING}" "${COLOR_RESET}"
-    printf "  %b%-10s%b %-25s %s\n" "${COLOR_SUCCESS}" "create" "${COLOR_RESET}" "NAME [OPTIONS]" "Create a new VM."
-    printf "    %bOptions:%b --memory VALUE, --cores VALUE, --disk-size VALUE, --machine VALUE, --iso PATH\n" "${COLOR_WARNING}" "${COLOR_RESET}"
-    printf "  %b%-10s%b %-25s %s\n" "${COLOR_SUCCESS}" "start" "${COLOR_RESET}" "NAME_OR_ID [OPTIONS]" "Start an existing VM."
-    printf "    %bOptions:%b --iso PATH, --headless, --extra-args \"QEMU_OPTIONS\"\n" "${COLOR_WARNING}" "${COLOR_RESET}"
-    printf "  %b%-10s%b %-25s %s\n" "${COLOR_SUCCESS}" "stop" "${COLOR_RESET}" "NAME_OR_ID [--force]" "Stop a running VM."
-    printf "  %b%-10s%b %-25s %s\n" "${COLOR_SUCCESS}" "status" "${COLOR_RESET}" "NAME_OR_ID" "Display VM status."
-    printf "  %b%-10s%b %-25s %s\n" "${COLOR_SUCCESS}" "delete" "${COLOR_RESET}" "NAME_OR_ID [--force]" "Delete a VM."
-    printf "  %b%-10s%b %-25s %s\n" "${COLOR_SUCCESS}" "list" "${COLOR_RESET}" "" "List all VMs."
-    printf "  %b%-10s%b %-25s %s\n" "${COLOR_SUCCESS}" "wizard" "${COLOR_RESET}" "" "Interactive VM creation."
-    printf "  %b%-10s%b %-25s %s\n" "${COLOR_SUCCESS}" "edit" "${COLOR_RESET}" "NAME_OR_ID" "Edit VM configuration."
-    printf "\n%bExamples:%b\n" "${COLOR_WARNING}" "${COLOR_RESET}"
-    printf "  %-45s %s\n" "qemate vm create myvm --memory 4G --cores 4" "Create a VM with custom settings."
-    printf "  %-45s %s\n" "qemate vm start myvm --iso /path/to/install.iso --headless" "Start VM in headless mode."
-    printf "  %-45s %s\n" "qemate vm start myvm --extra-args \"-cpu host,+avx512\"" "Start VM with custom QEMU args."
+    cat <<EOF
+Qemate VM Command Help
+
+Usage:
+  qemate vm SUBCOMMAND [OPTIONS]
+
+Subcommands:
+  create NAME [--memory VALUE] [--cores VALUE] [--disk-size VALUE] [--machine VALUE] [--iso PATH]
+  start  NAME_OR_ID [--iso PATH] [--headless] [--extra-args "QEMU_OPTIONS"]
+  stop   NAME_OR_ID [--force]
+  status NAME_OR_ID
+  delete NAME_OR_ID [--force]
+  list
+  wizard
+  edit   NAME_OR_ID
+
+Options:
+  --memory VALUE       Memory size in MB or GB (default 2048)
+  --cores VALUE        CPU cores (default 2)
+  --disk-size VALUE    Disk size in GB (default 20)
+  --machine VALUE      QEMU machine type (optional)
+  --iso PATH           Path to ISO file for installation
+  --headless           Run without GUI for start
+  --extra-args STRING  Extra QEMU options
+  --force              Force stop or delete operation
+
+Examples:
+  qemate vm create myvm --memory 4096 --cores 4
+  qemate vm start myvm --iso /path/to/install.iso --headless
+  qemate vm start myvm --extra-args "-cpu host,+avx512"
+EOF
 }
 
 # Network command help display
 show_net_help() {
-    printf "%bQemate Net Command Help%b\n\n" "${COLOR_INFO}" "${COLOR_RESET}"
-    printf "%bUsage:%b\n" "${COLOR_WARNING}" "${COLOR_RESET}"
-    printf "  qemate net SUBCOMMAND [OPTIONS]\n\n"
-    printf "%bSubcommands:%b\n" "${COLOR_WARNING}" "${COLOR_RESET}"
-    printf "  %bport%b    Configure port forwards (VM must be stopped).\n" "${COLOR_SUCCESS}" "${COLOR_RESET}"
-    printf "    %bSubcommands:%b\n" "${COLOR_WARNING}" "${COLOR_RESET}"
-    printf "      %badd%b     NAME_OR_ID         Add a port forward.\n" "${COLOR_SUCCESS}" "${COLOR_RESET}"
-    printf "        %bOptions:%b --host PORT, --guest PORT, --proto PROTO\n" "${COLOR_WARNING}" "${COLOR_RESET}"
-    printf "      %bremove%b  NAME_OR_ID PORT[:PROTO]  Remove a port forward.\n" "${COLOR_SUCCESS}" "${COLOR_RESET}"
-    printf "      %blist%b    NAME_OR_ID         List all port forwards.\n" "${COLOR_SUCCESS}" "${COLOR_RESET}"
-    printf "  %bset%b     NAME_OR_ID {nat|user|none}  Set the network type.\n" "${COLOR_SUCCESS}" "${COLOR_RESET}"
-    printf "  %bmodel%b   NAME_OR_ID [{e1000|virtio-net-pci}]  Set the network device model.\n" "${COLOR_SUCCESS}" "${COLOR_RESET}"
-    printf "\n%bExamples:%b\n" "${COLOR_WARNING}" "${COLOR_RESET}"
-    printf "  qemate net port add myvm --host 8080 --guest 80    Add a port forward.\n"
-    printf "  qemate net set myvm nat                            Set network type to NAT.\n"
-    printf "  qemate net model myvm virtio-net-pci               Set network model to virtio.\n"
+    cat <<EOF
+Qemate Net Command Help
+
+Usage:
+  qemate net SUBCOMMAND [OPTIONS]
+
+Subcommands:
+  port                Configure port forwards (VM must be stopped)
+    add     NAME_OR_ID         Add a port forward
+    remove  NAME_OR_ID PORT[:PROTO]  Remove a port forward
+    list    NAME_OR_ID         List all port forwards
+
+  set     NAME_OR_ID {nat|user|none}     Set the network type
+  model   NAME_OR_ID [{e1000|virtio-net-pci}]  Set the network device model
+
+Options:
+  --host PORT         Host port to forward
+  --guest PORT        Guest port to map to
+  --proto PROTO       Protocol (default tcp)
+
+Examples:
+  qemate net port add myvm --host 8080 --guest 80
+  qemate net set myvm nat
+  qemate net model myvm virtio-net-pci
+EOF
 }
+
 
 # Network port help display
 show_net_port_help() {
-    printf "%bQemate Net Port Command Help%b\n\n" "${COLOR_INFO}" "${COLOR_RESET}"
-    printf "%bUsage:%b\n" "${COLOR_WARNING}" "${COLOR_RESET}"
-    printf "  qemate net port SUBCOMMAND [OPTIONS]\n\n"
-    printf "%bDescription:%b\n" "${COLOR_WARNING}" "${COLOR_RESET}"
-    printf "  Manage port forwards for a VM (VM must be stopped).\n\n"
-    printf "%bSubcommands:%b\n" "${COLOR_WARNING}" "${COLOR_RESET}"
-    printf "  %badd%b     NAME_OR_ID         Add a port forward.\n" "${COLOR_SUCCESS}" "${COLOR_RESET}"
-    printf "    %bOptions:%b --host PORT, --guest PORT, --proto PROTO\n" "${COLOR_WARNING}" "${COLOR_RESET}"
-    printf "  %bremove%b  NAME_OR_ID PORT[:PROTO]  Remove a port forward.\n" "${COLOR_SUCCESS}" "${COLOR_RESET}"
-    printf "  %blist%b    NAME_OR_ID         List all port forwards.\n" "${COLOR_SUCCESS}" "${COLOR_RESET}"
+    cat <<EOF
+Qemate Net Port Command Help
+
+Usage:
+  qemate net port SUBCOMMAND [OPTIONS]
+
+Description:
+  Manage port forwards for a VM (VM must be stopped)
+
+Subcommands:
+  add     NAME_OR_ID         Add a port forward
+  remove  NAME_OR_ID PORT[:PROTO]  Remove a port forward
+  list    NAME_OR_ID         List all port forwards
+
+Options:
+  --host PORT         Host port to forward
+  --guest PORT        Guest port to map to
+  --proto PROTO       Protocol (default tcp)
+EOF
 }
+
 
 # Network set help display
 show_net_set_help() {
-    printf "%bQemate Net Set Command Help%b\n\n" "${COLOR_INFO}" "${COLOR_RESET}"
-    printf "%bUsage:%b\n" "${COLOR_WARNING}" "${COLOR_RESET}"
-    printf "  qemate net set NAME_OR_ID {nat|user|none}\n\n"
-    printf "%bDescription:%b\n" "${COLOR_WARNING}" "${COLOR_RESET}"
-    printf "  Set the network type for a VM.\n\n"
-    printf "%bOptions:%b\n" "${COLOR_WARNING}" "${COLOR_RESET}"
-    printf "  NAME_OR_ID         The name or ID of the VM.\n"
-    printf "  {nat|user|none}    Network type (default: user).\n"
+    cat <<EOF
+Qemate Net Set Command Help
+
+Usage:
+  qemate net set NAME_OR_ID {nat|user|none}
+
+Description:
+  Set the network type for a VM
+
+Options:
+  NAME_OR_ID         The name or ID of the VM
+  {nat|user|none}    Network type (default: user)
+EOF
 }
+
 
 # Network model help display
 show_net_model_help() {
-    printf "%bQemate Net Model Command Help%b\n\n" "${COLOR_INFO}" "${COLOR_RESET}"
-    printf "%bUsage:%b\n" "${COLOR_WARNING}" "${COLOR_RESET}"
-    printf "  qemate net model NAME_OR_ID [{e1000|virtio-net-pci}]\n\n"
-    printf "%bDescription:%b\n" "${COLOR_WARNING}" "${COLOR_RESET}"
-    printf "  Set the network device model for a VM.\n\n"
-    printf "%bOptions:%b\n" "${COLOR_WARNING}" "${COLOR_RESET}"
-    printf "  NAME_OR_ID             The name or ID of the VM.\n"
-    printf "  [{e1000|virtio-net-pci}]  Network model (default: virtio-net-pci).\n"
+    cat <<EOF
+Qemate Net Model Command Help
+
+Usage:
+  qemate net model NAME_OR_ID [{e1000|virtio-net-pci}]
+
+Description:
+  Set the network device model for a VM
+
+Options:
+  NAME_OR_ID               The name or ID of the VM
+  {e1000|virtio-net-pci}   Network model (default: virtio-net-pci)
+EOF
 }
 
 ###############################################################################
