@@ -1,20 +1,20 @@
 # Qemate - QEMU Virtual Machine Manager
 
-Qemate is a streamlined command-line utility designed to simplify the management of QEMU virtual machines (VMs). It provides an intuitive interface for creating, starting, stopping, and deleting VMs, as well as configuring their networking, shared folders, and USB devices. Leveraging QEMU with KVM acceleration, Qemate ensures enhanced performance when supported by the host system.
+Qemate is a streamlined command-line utility designed to simplify the management of QEMU virtual machines (VMs). It provides an intuitive interface for creating, starting, stopping, and deleting VMs, as well as configuring their networking. Leveraging QEMU with KVM acceleration, Qemate ensures enhanced performance when supported by the host system.
 
 ## Features
 
-- **VM Management**: Create, start, stop, delete, and list virtual machines with ease.
+- **VM Management**: Create, start, stop, delete, and list virtual machines with ease. There is also an easy to use wizard mode!
 - **Networking**: Configure port forwarding, network types (NAT, user, none), and network models (e1000, virtio-net-pci).
 - **Performance**: Optimized for KVM acceleration with sensible defaults.
 - **Extensible**: Modular Bash script design for easy customization.
 
 ## Requirements
 
-- **QEMU**: Version 4.0.0 or higher, installed and configured.
+- **QEMU**: Version 9.0.0 or higher, installed and configured.
 - **KVM**: Optional, for hardware acceleration (recommended).
 - **Bash**: Version 4.0 or higher.
-- **Linux**: Tested on common distributions; requires standard utilities (`lsusb`, `qemu-img`, etc.).
+- **Linux**: Tested on common distributions.
 
 ## Installation
 
