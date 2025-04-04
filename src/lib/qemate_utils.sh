@@ -290,25 +290,43 @@ get_vm_info() {
     
     case "$mode" in
         name_from_id)
-            # Try cache first
-            for vm_name in "${!VM_CACHE[@]}"; do
-                [[ "${VM_CACHE[$vm_name]}" == "$value" ]] && {
-                    printf "%s" "$vm_name"
-                    return 0
-                }
-            done
-            
-            # Fall back to checking all config files
-            for config in "$VM_DIR"/*/config; do
-                [[ -f "$config" ]] || continue
-                if source "$config" && [[ "${ID:-}" == "$value" ]]; then
-                    printf "%s" "$NAME"
+            # Check if value is a number (likely an ID)
+            if [[ "$value" =~ ^[0-9]+$ ]]; then
+                # Try to find VM with this ID
+                for vm_name in "${!VM_CACHE[@]}"; do
+                    [[ "${VM_CACHE[$vm_name]}" == "$value" ]] && {
+                        printf "%s" "$vm_name"
+                        return 0
+                    }
+                done
+                
+                # Fall back to checking all config files for this ID
+                for config in "$VM_DIR"/*/config; do
+                    [[ -f "$config" ]] || continue
+                    if source "$config" && [[ "${ID:-}" == "$value" ]]; then
+                        printf "%s" "$NAME"
+                        return 0
+                    fi
+                done
+                
+                log_message "ERROR" "No VM found with ID: $value."
+                return 1
+            else
+                # If not a number, treat as a name directly
+                if [[ -n "${VM_CACHE[$value]}" ]]; then
+                    printf "%s" "$value"
                     return 0
                 fi
-            done
-            
-            log_message "ERROR" "No VM found with ID: $value."
-            return 1
+                
+                # Check if VM directory exists
+                if [[ -d "$VM_DIR/$value" && -f "$VM_DIR/$value/config" ]]; then
+                    printf "%s" "$value"
+                    return 0
+                fi
+                
+                log_message "ERROR" "VM not found: $value."
+                return 1
+            fi
             ;;
             
         id_from_name)
