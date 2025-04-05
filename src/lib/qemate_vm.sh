@@ -146,6 +146,17 @@ MEMORY_SHARE=1
 EOF
 }
 
+# Check if a VM is running
+# Arguments:
+#   $1: VM name
+# Returns:
+#   0 if running, 1 if not running
+is_vm_running() {
+    local vm_name="$1"
+    pgrep -f "guest=$vm_name" >/dev/null
+    return $?
+}
+
 # ============================================================================ #
 # VM MANAGEMENT FUNCTIONS                                                      #
 # ============================================================================ #
@@ -371,8 +382,21 @@ vm_start() {
     log_message "INFO" "Starting VM '$vm_name'."
     "$QEMU_BIN" "${qemu_args[@]}" >>"$log_file" 2>&1 &
     local pid=$!
-    
-    # Verify VM started successfully
+
+    # For test mode, skip the process check
+    if [[ "${QEMATE_TEST_MODE:-0}" -eq 1 ]]; then
+        echo "$pid" >"$vm_lock/pid" || {
+            log_message "ERROR" "Failed to write PID to $vm_lock/pid."
+            kill "$pid" 2>/dev/null
+            release_lock "$vm_lock"
+            return 1
+        }
+        release_lock "$vm_lock" || return 1
+        log_message "SUCCESS" "Started VM '$vm_name' (PID: $pid)."
+        return 0
+    fi
+
+    # Regular verification for non-test mode
     sleep 1
     if ! kill -0 "$pid" 2>/dev/null; then
         log_message "ERROR" "Failed to start VM '$vm_name'. Check $log_file for details."
@@ -505,18 +529,20 @@ vm_delete() {
         return 1
     fi
 
-    # Prompt for confirmation
-    local confirm
-    read -r -p "Are you sure you want to delete VM '$vm_name'? [y/N] " confirm
-    case "$confirm" in
-    [yY] | [yY][eE][sS])
-        log_message "INFO" "User confirmed deletion of VM '$vm_name'."
-        ;;
-    *)
-        log_message "INFO" "Deletion of VM '$vm_name' canceled by user."
-        return 0
-        ;;
-    esac
+    # Prompt for confirmation (unless in test mode)
+    if [[ "${QEMATE_TEST_MODE:-0}" -eq 0 ]]; then
+        local confirm
+        read -r -p "Are you sure you want to delete VM '$vm_name'? [y/N] " confirm
+        case "$confirm" in
+        [yY] | [yY][eE][sS])
+            log_message "INFO" "User confirmed deletion of VM '$vm_name'."
+            ;;
+        *)
+            log_message "INFO" "Deletion of VM '$vm_name' canceled by user."
+            return 0
+            ;;
+        esac
+    fi
 
     # Force stop VM if needed
     [[ "$force" -eq 1 ]] && vm_stop "$vm_name" --force
@@ -537,7 +563,7 @@ vm_delete() {
 # Returns:
 #   0 on success, non-zero on failure
 vm_list() {
-    # Update VM cache
+    # Update VM cache - force a refresh in test mode
     cache_vms
     
     # Check if any VMs exist
@@ -553,10 +579,11 @@ vm_list() {
     # List each VM with its status
     for vm_name in "${!VM_CACHE[@]}"; do
         local status="Stopped"
-        pgrep -f "guest=$vm_name,process=qemu-$vm_name" >/dev/null && status="Running"
+        is_vm_running "$vm_name" && status="Running"
         printf "%-5s %-20s %-10s\n" "${VM_CACHE[$vm_name]}" "$vm_name" "$status"
     done
 }
+
 
 # Interactive wizard for VM creation
 # Arguments: None

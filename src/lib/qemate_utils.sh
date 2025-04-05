@@ -31,12 +31,15 @@ if [[ -z "${LOG_DIR:-}" ]]; then
 fi
 
 # Create temporary directory with proper error handling
-TEMP_DIR=""
 if ! TEMP_DIR=$(mktemp -d -t "qemate.XXXXXXXXXX" 2>/dev/null); then
     echo "Error: Failed to create temp directory." >&2
     exit 1
 fi
-readonly TEMP_DIR
+if [[ "${QEMATE_TEST_MODE:-0}" -eq 1 ]]; then
+    export TEMP_DIR
+else
+    readonly TEMP_DIR
+fi
 
 # Define required commands
 readonly REQUIRED_COMMANDS=("qemu-system-x86_64" "qemu-img" "pgrep" "mktemp" "find" "sed" "flock")
@@ -233,29 +236,41 @@ check_system_requirements() {
 # Returns:
 #   0 on success, 1 on failure
 cache_vms() {
-    local now
-    
-    # Get current timestamp with error handling
-    if ! now=$(date +%s); then
-        log_message "ERROR" "Failed to get timestamp."
-        return 1
+    # Always refresh the cache in test mode to ensure we have the latest VM data
+    if [[ "${QEMATE_TEST_MODE:-0}" -eq 1 ]]; then
+        unset VM_CACHE
+        declare -gA VM_CACHE
+    else
+        local now
+        # Get current timestamp with error handling
+        if ! now=$(date +%s); then
+            log_message "ERROR" "Failed to get timestamp."
+            return 1
+        fi
+        
+        # Skip caching if cache is still fresh (less than 30 seconds old)
+        if [[ -n "${VM_CACHE_TIMESTAMP:-}" && $((now - VM_CACHE_TIMESTAMP)) -lt 30 ]]; then
+            return 0
+        fi
+        
+        # Clear existing cache
+        unset VM_CACHE
+        declare -gA VM_CACHE
     fi
     
-    # Skip caching if cache is still fresh (less than 30 seconds old)
-    [[ -n "${VM_CACHE_TIMESTAMP:-}" && $((now - VM_CACHE_TIMESTAMP)) -lt 30 ]] && return 0
-    
-    # Clear existing cache
-    VM_CACHE=()
-    
-    # Find all VM directories
-    local vm_paths
-    if ! mapfile -t vm_paths < <(find "$VM_DIR" -mindepth 1 -maxdepth 1 -type d -print | sort); then
-        log_message "ERROR" "Failed to list VMs."
-        return 1
-    fi
+    # Force a directory list refresh by using a direct glob instead of find
+    # This is more reliable in test environments
+    local vm_dirs=()
+    for dir in "$VM_DIR"/*; do
+        [[ -d "$dir" ]] && vm_dirs+=("$dir")
+    done
     
     # Process each VM directory
-    for vm_path in "${vm_paths[@]}"; do
+    local counter=1
+    for vm_path in "${vm_dirs[@]}"; do
+        # Skip the logs directory
+        [[ "$vm_path" == "$LOG_DIR" ]] && continue
+        
         local config_file="$vm_path/config"
         [[ ! -f "$config_file" ]] && continue
         
@@ -264,20 +279,16 @@ cache_vms() {
             continue
         fi
         
-        # Source the config file safely
-        if ! source "$config_file"; then
-            log_message "WARNING" "Failed to source config for $vm_name."
-            continue
-        fi
-        
-        # Add to cache
-        VM_CACHE["$vm_name"]="${ID:-}"
+        # Add to cache with index as value
+        VM_CACHE["$vm_name"]="$counter"
+        ((counter++))
     done
     
     # Update cache timestamp
-    VM_CACHE_TIMESTAMP="$now"
+    VM_CACHE_TIMESTAMP="$(date +%s)"
     return 0
 }
+
 
 # Get VM information by name or ID
 # Arguments:

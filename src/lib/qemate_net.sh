@@ -391,15 +391,21 @@ net_port_add() {
     # Define update function for with_config_file
     update_port_add() {
         local temp_config="$1"
+        local new_forwards=""
+        if [[ -n "$PORT_FORWARDS" ]]; then
+            new_forwards="${PORT_FORWARDS},${host}:${guest}:${proto}"
+        else
+            new_forwards="${host}:${guest}:${proto}"
+        fi
+        if grep -q "^PORT_FORWARDS=" "$temp_config"; then
+            sed -i "s/^PORT_FORWARDS=.*/PORT_FORWARDS=\"${new_forwards}\"/" "$temp_config"
+        else
+            echo "PORT_FORWARDS=\"${new_forwards}\"" >>"$temp_config"
+        fi
         if grep -q "^PORT_FORWARDING_ENABLED=" "$temp_config"; then
             sed -i "s/^PORT_FORWARDING_ENABLED=.*/PORT_FORWARDING_ENABLED=1/" "$temp_config"
         else
             echo "PORT_FORWARDING_ENABLED=1" >>"$temp_config"
-        fi
-        if grep -q "^PORT_FORWARDS=" "$temp_config"; then
-            sed -i "/^PORT_FORWARDS=/ s/\"$/,${host}:${guest}:${proto}\"/" "$temp_config"
-        else
-            echo "PORT_FORWARDS=\"${host}:${guest}:${proto}\"" >>"$temp_config"
         fi
     }
     
