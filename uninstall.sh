@@ -15,19 +15,14 @@ COMPLETIONDIR="${COMPLETIONDIR:-$PREFIX/share/bash-completion/completions}"
 echo "=== Qemate Uninstallation ==="
 echo "Removing from:"
 echo "  Binary:      $BINDIR"
-echo "  Libraries:   $LIBDIR"
 echo "  Docs:        $DOCDIR"
 echo "  Man Page:    $MANDIR"
 echo "  Completion:  $COMPLETIONDIR"
 echo ""
 
-# Remove main script
-echo "Removing main script..."
+# Remove the script
+echo "Removing the script..."
 [ -f "$BINDIR/qemate" ] && rm -f "$BINDIR/qemate" || echo "Main script not found at $BINDIR/qemate, skipping."
-
-# Remove library files
-echo "Removing libraries..."
-[ -d "$LIBDIR" ] && rm -rf "$LIBDIR" || echo "Library directory not found at $LIBDIR, skipping."
 
 # Remove documentation
 echo "Removing documentation..."

@@ -2,10 +2,22 @@
 
 All notable changes to Qemate will be documented in this file.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.1.0] - 2025-03-31
+## [2.0.0] - 29/04/2025
+- Added audio support(requires PipeWire installed and running; audio is disabled if PipeWire is unavailable).
+- Updated the man page, completion.
+
+## [1.1.1] - 05/04/2025
+- First public release.
+
+### Added
+- **VM Locking**: Added `vm lock` and `vm unlock` subcommands to prevent accidental deletion of VMs. Locked VMs cannot be deleted until explicitly unlocked.
+- **Locked Status Display**: Updated `vm list` to show whether each VM is locked in a new "LOCKED" column.
+
+### Changed
+- Removed the use of ID for handling commands.
+
+## [1.1.0] - 31/03/2025
 ### Added
 - **Networking Enhancements**:
   - Support for `nat`, `user`, and `none` network types (`net set` command).
@@ -14,11 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **VM Management**:
   - Added `--headless` option for starting VMs without a graphical console.
   - Improved VM status display with detailed information (memory, cores, disk usage).
-- **Testing**: Added BATS test suite for core functionality (`tests/qemate_tests.bats`).
 - **Bash Completion**: Enhanced autocompletion for commands, subcommands, and VM names.
 
 ### Changed
-- Updated minimum QEMU requirement to 8.0.0 for better compatibility.
+- Updated minimum QEMU requirement to 9.0.0 for better compatibility.
 - Improved error handling and logging across all commands.
 - Default network model changed to `virtio-net-pci` for better performance.
 
@@ -26,10 +37,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Graceful shutdown timeout handling in `vm stop`.
 - Lock management to prevent race conditions during VM operations.
 
-## [1.0.0] - 2025-03-25
+## [1.0.0] - 25/03/2025
 
 ### Added
-- Initial stable release with full VM management, networking, shared folders, and USB support.
+- Initial private release with full VM management and networking.
 
 ### Changed
 - N/A
@@ -37,14 +48,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - N/A
 
-## [0.1.0] - 2025-03-19
+## [0.1.0] - 19/03/2025
 
 ### Added
 - Initial project structure
 - Basic VM management functionality (start, stop, status)
 - Basic network configuration
-- Shared folder mounting capabilities
-- USB device management
 - Command-line interface with subcommands
 
 ### Changed

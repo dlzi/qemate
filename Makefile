@@ -15,18 +15,12 @@ all:
 install:
 	@echo "Installing Qemate..."
 	@install -d $(DESTDIR)$(BINDIR)
-	@install -d $(DESTDIR)$(LIBDIR)
 	@install -d $(DESTDIR)$(DOCDIR)
 	@install -d $(DESTDIR)$(MANDIR)
 	@install -d $(DESTDIR)$(COMPLETIONDIR)
 	
-	# Install main script
+	# Install the script
 	@install -m 755 src/qemate.sh $(DESTD IR)$(BINDIR)/qemate
-	
-	# Install library files
-	@for lib in src/lib/*.sh; do \
-		install -m 644 $$lib $(DESTDIR)$(LIBDIR)/; \
-	done
 	
 	# Install documentation
 	@install -m 644 README.md $(DESTDIR)$(DOCDIR)/
@@ -40,10 +34,6 @@ install:
 uninstall:
 	@echo "Running uninstall script..."
 	@./uninstall.sh
-
-test:
-	@echo "Running tests..."
-	@./tests/run_tests.sh
 
 clean:
 	@echo "Nothing to clean."

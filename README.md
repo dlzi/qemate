@@ -1,20 +1,26 @@
 # Qemate - QEMU Virtual Machine Manager
 
-Qemate is a streamlined command-line utility designed to simplify the management of QEMU virtual machines (VMs). It provides an intuitive interface for creating, starting, stopping, and deleting VMs, as well as configuring their networking. Leveraging QEMU with KVM acceleration, Qemate ensures enhanced performance when supported by the host system.
+Qemate is a streamlined command-line utility for managing QEMU virtual machines (VMs). It simplifies VM creation, control, and networking, leveraging QEMU with KVM acceleration for enhanced performance when supported by the host system.
 
 ## Features
 
-- **VM Management**: Create, start, stop, delete, and list virtual machines with ease. There is also an easy to use wizard mode!
-- **Networking**: Configure port forwarding, network types (NAT, user, none), and network models (e1000, virtio-net-pci).
+- **VM Management**: Create, start, stop, delete, list, edit, and check status of VMs.
+- **Interactive Wizard**: Guided VM creation with `qemate vm wizard`.
+- **Locking Mechanism**: Lock/unlock VMs to prevent accidental deletion.
+- **Networking**: Configure port forwarding, network types (nat, user, none), and network models (e1000, virtio-net-pci).
+- **Audio Support**: Enable audio output via PipeWire.
 - **Performance**: Optimized for KVM acceleration with sensible defaults.
-- **Extensible**: Modular Bash script design for easy customization.
+- **Logging**: Detailed logs with configurable verbosity (`LOG_LEVEL`: DEBUG, INFO, WARNING, ERROR).
+- **Bash Completion**: Tab completion for commands and options.
 
 ## Requirements
 
-- **QEMU**: Version 9.0.0 or higher, installed and configured.
-- **KVM**: Optional, for hardware acceleration (recommended).
 - **Bash**: Version 4.0 or higher.
-- **Linux**: Tested on common distributions.
+- **QEMU**: `qemu-system-x86_64` and `qemu-img` (any recent version).
+- **Optional**:
+  - `bash-completion`: For tab completion.
+  - PipeWire: For audio support with `--enable-audio`.
+- **Recommended**: KVM support for hardware acceleration (`/dev/kvm` accessible).
 
 ## Installation
 
@@ -26,14 +32,14 @@ Qemate is a streamlined command-line utility designed to simplify the management
    cd qemate
    ```
 
-2. Install using `make`:
+2. Install using the provided script:
    ```bash
-   sudo make install
+   sudo ./install.sh
    ```
 
-   This installs Qemate to the default prefix `/usr/local`. To specify a custom prefix:
+   This installs to `/usr/local` by default. Customize paths with:
    ```bash
-   sudo make install PREFIX=/custom/path
+   sudo ./install.sh PREFIX=/custom/path BINDIR=/custom/bin MANDIR=/custom/man DOCDIR=/custom/doc
    ```
 
 3. Verify installation:
@@ -41,107 +47,150 @@ Qemate is a streamlined command-line utility designed to simplify the management
    qemate version
    ```
 
-### Manual Installation
+### Arch Linux
 
-Run the provided `install.sh` script:
+Build and install using `PKGBUILD`:
 ```bash
-sudo ./install.sh
+makepkg -si
 ```
 
 ### Uninstallation
 
-To remove Qemate:
+Remove Qemate:
 ```bash
 sudo ./uninstall.sh
 ```
 
-Or, if installed via `make`:
-```bash
-sudo make uninstall
-```
-
 ## Usage
 
-Qemate operates via a simple command structure: `qemate COMMAND [SUBCOMMAND] [OPTIONS]`.
+Qemate uses the syntax: `qemate COMMAND [SUBCOMMAND] [OPTIONS]`.
+
+### Commands
+
+- **VM Management**:
+  - `qemate vm create NAME [--memory VALUE] [--cores VALUE] [--disk-size VALUE] [--machine VALUE] [--iso PATH] [--os-type VALUE] [--enable-audio]`: Create a VM.
+  - `qemate vm start NAME [--iso PATH] [--headless] [--extra-args "QEMU_OPTIONS"]`: Start a VM.
+  - `qemate vm stop NAME [--force]`: Stop a VM.
+  - `qemate vm delete NAME [--force]`: Delete a VM.
+  - `qemate vm list`: List all VMs.
+  - `qemate vm status NAME`: Check VM status.
+  - `qemate vm edit NAME`: Edit VM configuration.
+  - `qemate vm wizard`: Interactively create a VM.
+  - `qemate vm lock NAME`: Lock a VM.
+  - `qemate vm unlock NAME`: Unlock a VM.
+
+- **Networking**:
+  - `qemate net port add NAME --host PORT --guest PORT [--proto PROTO]`: Add port forward (default proto: tcp).
+  - `qemate net port remove NAME PORT[:PROTO]`: Remove port forward.
+  - `qemate net port list NAME`: List port forwards.
+  - `qemate net set NAME {nat|user|none}`: Set network type (default: user).
+  - `qemate net model NAME [{e1000|virtio-net-pci}]`: Set/display network model (default: virtio-net-pci).
+
+- **Other**:
+  - `qemate help`: Display help.
+  - `qemate version`: Show version (2.0.0).
 
 ### Examples
 
-#### Create a VM
-Create a VM named `myvm` with 4GB memory and 4 CPU cores:
-```bash
-qemate vm create myvm --memory 4G --cores 4
-```
+- Create a VM with 4GB memory and 4 cores:
+  ```bash
+  qemate vm create myvm --memory 4G --cores 4
+  ```
 
-#### Start a VM with an ISO
-Start `myvm` using an installation ISO:
-```bash
-qemate vm start myvm --iso /path/to/install.iso
-```
+- Start a VM with an ISO in headless mode:
+  ```bash
+  qemate vm start myvm --iso /path/to/install.iso --headless
+  ```
 
-#### Stop a VM
-Stop `myvm` gracefully:
-```bash
-qemate vm stop myvm
-```
+- Stop a VM forcefully:
+  ```bash
+  qemate vm stop myvm --force
+  ```
 
-#### Delete a VM
-Delete `myvm` and its files (requires confirmation unless `--force` is used):
-```bash
-qemate vm delete myvm
-```
-#### Add a Port Forward
-Forward host port 8080 to guest port 80:
-```bash
-qemate net port add myvm --host 8080 --guest 80
-```
+- Delete a VM without confirmation:
+  ```bash
+  qemate vm delete myvm --force
+  ```
 
-#### Set Network Type
-Set the network type to NAT:
-```bash
-qemate net set myvm nat
-```
+- Lock/unlock a VM:
+  ```bash
+  qemate vm lock myvm
+  qemate vm unlock myvm
+  ```
 
-#### Set Network Model
-Set the network model to e1000 (defaults to e1000 if not specified):
-```bash
-qemate net model myvm e1000
-```
+- Add a TCP port forward:
+  ```bash
+  qemate net port add myvm --host 8080 --guest 80 --proto tcp
+  ```
 
-Or use virtio-net-pci:
-```
-qemate net model myvm virtio-net-pci
-```
+- Remove a port forward:
+  ```bash
+  qemate net port remove myvm 8080:tcp
+  ```
+
+- Set network type to NAT:
+  ```bash
+  qemate net set myvm nat
+  ```
+
+- Set network model to virtio-net-pci:
+  ```bash
+  qemate net model myvm virtio-net-pci
+  ```
+
+- List VMs:
+  ```bash
+  qemate vm list
+  ```
+
+- Check VM status:
+  ```bash
+  qemate vm status myvm
+  ```
 
 For detailed help:
 ```bash
 qemate help
 qemate vm help
+qemate net help
 ```
 
 ## Configuration
 
-VM configurations are stored in `${HOME}/QVMs`. Logs are written to `${HOME}/QVMs/logs/qemate.log`.
+- **VM Directory**: `${HOME}/QVMs` (customize with `QEMATE_VM_DIR`).
+- **Configurations**: `${HOME}/QVMs/VM_NAME/config`.
+- **Disk Images**: `${HOME}/QVMs/VM_NAME/disk.qcow2` (qcow2 format).
+- **Logs**:
+  - Qemate logs: `${HOME}/QVMs/VM_NAME/logs/error.log`.
+  - QEMU output: `${HOME}/QVMs/VM_NAME/qemu.log`.
+- **Logging Verbosity**: Set `LOG_LEVEL` (DEBUG, INFO, WARNING, ERROR; default: ERROR).
 
-## Testing
+## Troubleshooting
 
-Run the included BATS tests:
-```bash
-make test
-```
-
-Tests are located in `tests/qemate_tests.bats` and use mock implementations for QEMU and system commands.
+- **KVM Issues**: Ensure `/dev/kvm` is accessible:
+  ```bash
+  sudo usermod -a -G kvm $USER
+  ```
+- **Audio Issues**: Verify PipeWire is installed and running for `--enable-audio`.
+- **Errors**: Check logs at `${HOME}/QVMs/VM_NAME/logs/error.log` or `${HOME}/QVMs/VM_NAME/qemu.log`.
 
 ## Contributing
 
-Contributions are welcome! Please:
-1. Fork the repository.
-2. Create a feature branch.
-3. Submit a pull request with clear descriptions and test coverage.
+Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for details. Key guidelines:
+- Follow the Google Shell Style Guide.
+- Use 4-space indentation.
+- Update `README.md`, `CHANGELOG.md`, and `VERSION` for changes.
+- Submit pull requests with clear descriptions.
 
 ## License
 
-Qemate is released under the [BSD 3-Clause License](LICENSE).
+Qemate is released under the [MIT License](LICENSE).
 
 ## Author
 
 Developed by Daniel Zilli.
+
+## Links
+
+- [GitHub Repository](https://github.com/dlzi/qemate)
+- [Issue Tracker](https://github.com/dlzi/qemate/issues)
