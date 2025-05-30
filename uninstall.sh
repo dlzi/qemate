@@ -6,10 +6,20 @@ set -e
 # Default installation paths (must match install.sh)
 PREFIX="${PREFIX:-/usr/local}"
 BINDIR="${BINDIR:-$PREFIX/bin}"
-LIBDIR="${LIBDIR:-$PREFIX/share/qemate}"
 DOCDIR="${DOCDIR:-$PREFIX/share/doc/qemate}"
 MANDIR="${MANDIR:-$PREFIX/share/man/man1}"
 COMPLETIONDIR="${COMPLETIONDIR:-$PREFIX/share/bash-completion/completions}"
+
+# Check if Qemate is installed
+if [ ! -f "$BINDIR/qemate" ] && [ ! -d "$DOCDIR" ] && [ ! -f "$MANDIR/qemate.1" ] && [ ! -f "$COMPLETIONDIR/qemate" ]; then
+    echo "Qemate does not appear to be installed in the specified paths."
+    echo "Checked paths:"
+    echo "  Binary:      $BINDIR"
+    echo "  Docs:        $DOCDIR"
+    echo "  Man Page:    $MANDIR"
+    echo "  Completion:  $COMPLETIONDIR"
+    exit 1
+fi
 
 # Print header
 echo "=== Qemate Uninstallation ==="

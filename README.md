@@ -1,25 +1,26 @@
 # Qemate - QEMU Virtual Machine Manager
 
-Qemate is a streamlined command-line utility for managing QEMU virtual machines (VMs). It simplifies VM creation, control, and networking, leveraging QEMU with KVM acceleration for enhanced performance when supported by the host system.
+Qemate is a streamlined command-line utility for managing QEMU virtual machines (VMs). It simplifies VM creation, control, and configuration, leveraging QEMU with KVM acceleration for enhanced performance when supported by the host system.
 
 ## Features
 
-- **VM Management**: Create, start, stop, delete, list, edit, and check status of VMs.
-- **Interactive Wizard**: Guided VM creation with `qemate vm wizard`.
-- **Locking Mechanism**: Lock/unlock VMs to prevent accidental deletion.
-- **Networking**: Configure port forwarding, network types (nat, user, none), and network models (e1000, virtio-net-pci).
-- **Audio Support**: Enable audio output via PipeWire.
-- **Performance**: Optimized for KVM acceleration with sensible defaults.
+- **VM Management**: Create, start, stop, delete, resize, list, and check status of VMs.
+- **Security**: Lock/unlock VMs to prevent modifications or deletion.
+- **Networking**: Configure network types (user, nat, none), network models (virtio-net-pci, e1000, rtl8139), and port forwarding.
+- **Folder Sharing**: Share one host folder with Linux guests (via VirtIO 9P filesystem) or Windows guests (via Samba/SMB).
+- **Audio Support**: Enable audio output via PipeWire (preferred), PulseAudio, or ALSA.
+- **Performance**: Optimized defaults for Linux and Windows VMs, with KVM acceleration and VirtIO support.
 - **Logging**: Detailed logs with configurable verbosity (`LOG_LEVEL`: DEBUG, INFO, WARNING, ERROR).
-- **Bash Completion**: Tab completion for commands and options.
+- **ISO Management**: Boot VMs from ISO files for installation.
 
 ## Requirements
 
-- **Bash**: Version 4.0 or higher.
-- **QEMU**: `qemu-system-x86_64` and `qemu-img` (any recent version).
+- **Bash**: Version 5.0 or higher.
+- **QEMU**: `qemu-system-x86_64` and `qemu-img` (version 9.0 or higher).
 - **Optional**:
-  - `bash-completion`: For tab completion.
-  - PipeWire: For audio support with `--enable-audio`.
+  - PipeWire, PulseAudio, or ALSA: For audio support with `--enable-audio`.
+  - Samba: For Windows guest folder sharing.
+  - `realpath`, `ss`, or `netstat`: For enhanced folder and network management.
 - **Recommended**: KVM support for hardware acceleration (`/dev/kvm` accessible).
 
 ## Installation
@@ -44,7 +45,7 @@ Qemate is a streamlined command-line utility for managing QEMU virtual machines 
 
 3. Verify installation:
    ```bash
-   qemate version
+   qemate --version
    ```
 
 ### Arch Linux
@@ -63,43 +64,76 @@ sudo ./uninstall.sh
 
 ## Usage
 
-Qemate uses the syntax: `qemate COMMAND [SUBCOMMAND] [OPTIONS]`.
+Qemate uses the syntax: `qemate <group> <command> [options]`.
 
-### Commands
+### VM Commands
 
-- **VM Management**:
-  - `qemate vm create NAME [--memory VALUE] [--cores VALUE] [--disk-size VALUE] [--machine VALUE] [--iso PATH] [--os-type VALUE] [--enable-audio]`: Create a VM.
-  - `qemate vm start NAME [--iso PATH] [--headless] [--extra-args "QEMU_OPTIONS"]`: Start a VM.
-  - `qemate vm stop NAME [--force]`: Stop a VM.
-  - `qemate vm delete NAME [--force]`: Delete a VM.
-  - `qemate vm list`: List all VMs.
-  - `qemate vm status NAME`: Check VM status.
-  - `qemate vm edit NAME`: Edit VM configuration.
-  - `qemate vm wizard`: Interactively create a VM.
-  - `qemate vm lock NAME`: Lock a VM.
-  - `qemate vm unlock NAME`: Unlock a VM.
+- `qemate vm create <name> [--os-type linux|windows] [--memory SIZE] [--cores N] [--disk-size SIZE] [--machine TYPE] [--enable-audio]`
+  Creates a VM with specified parameters (e.g., `myvm --os-type linux --memory 4G --cores 4`).
+- `qemate vm start <name> [--headless] [--iso PATH]`
+  Starts a VM, optionally in headless mode or with an ISO file.
+- `qemate vm stop <name> [--force]`
+  Stops a VM gracefully or forcefully.
+- `qemate vm delete <name> [--force]`
+  Deletes a VM, optionally skipping confirmation.
+- `qemate vm resize <name> <size> [--force]`
+  Resizes the VM's disk (e.g., `20G`, `100G`). VM must be stopped and unlocked unless `--force` is used.
+- `qemate vm list`
+  Lists all VMs with their status and lock state.
+- `qemate vm status <name>`
+  Displays detailed VM configuration and status.
+- `qemate vm configure <name> [cores|memory|audio] [value]`
+  Configures VM settings (e.g., `cores 4`, `memory 2G`, `audio on`). Without arguments, opens the config file in an editor (e.g., nano or vi).
 
-- **Networking**:
-  - `qemate net port add NAME --host PORT --guest PORT [--proto PROTO]`: Add port forward (default proto: tcp).
-  - `qemate net port remove NAME PORT[:PROTO]`: Remove port forward.
-  - `qemate net port list NAME`: List port forwards.
-  - `qemate net set NAME {nat|user|none}`: Set network type (default: user).
-  - `qemate net model NAME [{e1000|virtio-net-pci}]`: Set/display network model (default: virtio-net-pci).
+### Network Commands
 
-- **Other**:
-  - `qemate help`: Display help.
-  - `qemate version`: Show version (2.0.0).
+- `qemate net type <name> [user|nat|none]`
+  Sets or displays the network type.
+- `qemate net model <name> [virtio-net-pci|e1000|rtl8139]`
+  Sets or displays the network model (virtio-net-pci requires VirtIO enabled).
+- `qemate net port add <name> <host:guest[:tcp|udp]>`
+  Adds a port forward (e.g., `8080:80:tcp`).
+- `qemate net port remove <name> <host:guest[:tcp|udp]>`
+  Removes a port forward.
+
+### Shared Folder Commands
+
+- `qemate shared add <name> <folder_path> [mount_tag] [security_model]`
+  Adds a single shared folder (e.g., `~/Documents mydocs mapped-xattr`). Only one shared folder is supported per VM.
+- `qemate shared remove <name> <folder_path_or_mount_tag>`
+  Removes the shared folder by path or mount tag.
+- `qemate shared list <name>`
+  Lists the configured shared folder.
+
+### Security Commands
+
+- `qemate security lock <name>`
+  Locks a VM to prevent modifications or deletion.
+- `qemate security unlock <name>`
+  Unlocks a VM to allow modifications.
+
+### Other
+
+- `qemate help`
+  Displays detailed help information.
+- `qemate version`
+  Displays the program version (3.0.1).
 
 ### Examples
 
-- Create a VM with 4GB memory and 4 cores:
+- Create a Linux VM with 4GB memory and 4 cores:
   ```bash
-  qemate vm create myvm --memory 4G --cores 4
+  qemate vm create myvm --os-type linux --memory 4G --cores 4
   ```
 
-- Start a VM with an ISO in headless mode:
+- Create a Windows VM with audio enabled:
   ```bash
-  qemate vm start myvm --iso /path/to/install.iso --headless
+  qemate vm create winvm --os-type windows --enable-audio
+  ```
+
+- Start a VM in headless mode with an ISO:
+  ```bash
+  qemate vm start myvm --headless --iso /path/to/ubuntu.iso
   ```
 
 - Stop a VM forcefully:
@@ -112,33 +146,38 @@ Qemate uses the syntax: `qemate COMMAND [SUBCOMMAND] [OPTIONS]`.
   qemate vm delete myvm --force
   ```
 
+- Resize a VM's disk to 100GB:
+  ```bash
+  qemate vm resize myvm 100G
+  ```
+
 - Lock/unlock a VM:
   ```bash
-  qemate vm lock myvm
-  qemate vm unlock myvm
+  qemate security lock myvm
+  qemate security unlock myvm
   ```
 
-- Add a TCP port forward:
+- Configure network type to NAT:
   ```bash
-  qemate net port add myvm --host 8080 --guest 80 --proto tcp
+  qemate net type myvm nat
   ```
 
-- Remove a port forward:
+- Set network model to e1000:
   ```bash
-  qemate net port remove myvm 8080:tcp
+  qemate net model myvm e1000
   ```
 
-- Set network type to NAT:
+- Add a port forward (host 8080 to guest 80):
   ```bash
-  qemate net set myvm nat
+  qemate net port add myvm 8080:80:tcp
   ```
 
-- Set network model to virtio-net-pci:
+- Add a shared folder:
   ```bash
-  qemate net model myvm virtio-net-pci
+  qemate shared add myvm ~/Documents mydocs mapped-xattr
   ```
 
-- List VMs:
+- List all VMs:
   ```bash
   qemate vm list
   ```
@@ -151,19 +190,20 @@ Qemate uses the syntax: `qemate COMMAND [SUBCOMMAND] [OPTIONS]`.
 For detailed help:
 ```bash
 qemate help
-qemate vm help
-qemate net help
 ```
 
 ## Configuration
 
-- **VM Directory**: `${HOME}/QVMs` (customize with `QEMATE_VM_DIR`).
-- **Configurations**: `${HOME}/QVMs/VM_NAME/config`.
-- **Disk Images**: `${HOME}/QVMs/VM_NAME/disk.qcow2` (qcow2 format).
+- **VM Directory**: `${HOME}/QVMs` (customizable via `QEMATE_VM_DIR` environment variable).
+- **Configurations**: Stored in `${HOME}/QVMs/<name>/config`.
+- **Disk Images**: Stored in `${HOME}/QVMs/<name>/disk.qcow2` (qcow2 format).
 - **Logs**:
-  - Qemate logs: `${HOME}/QVMs/VM_NAME/logs/error.log`.
-  - QEMU output: `${HOME}/QVMs/VM_NAME/qemu.log`.
-- **Logging Verbosity**: Set `LOG_LEVEL` (DEBUG, INFO, WARNING, ERROR; default: ERROR).
+  - General: `${HOME}/QVMs/<name>/logs/qemate_vm.log`.
+  - Errors: `${HOME}/QVMs/<name>/logs/error.log`.
+- **Logging Verbosity**: Set via `LOG_LEVEL` environment variable (DEBUG, INFO, WARNING, ERROR; default: INFO).
+- **Default Configurations**:
+  - **Linux VMs**: 2 cores, 2GB RAM, 20GB disk, virtio-net-pci, virtio disk interface, VirtIO enabled, audio disabled.
+  - **Windows VMs**: 2 cores, 4GB RAM, 60GB disk, e1000 network model, ide-hd disk interface, VirtIO disabled, audio enabled.
 
 ## Troubleshooting
 
@@ -171,8 +211,76 @@ qemate net help
   ```bash
   sudo usermod -a -G kvm $USER
   ```
-- **Audio Issues**: Verify PipeWire is installed and running for `--enable-audio`.
-- **Errors**: Check logs at `${HOME}/QVMs/VM_NAME/logs/error.log` or `${HOME}/QVMs/VM_NAME/qemu.log`.
+  Check acceleration status with `qemate vm status <name>`.
+
+- **Audio Issues**: Ensure PipeWire (preferred), PulseAudio, or ALSA is installed and running for `--enable-audio`. Check logs for audio errors. PipeWire is prioritized over PulseAudio and ALSA.
+
+- **Folder Sharing (Linux Guests)**:
+  Only one shared folder is supported per VM. Mount shared folders in the guest:
+  ```bash
+  sudo mkdir -p /mnt/<mount_tag>
+  sudo mount -t 9p -o trans=virtio <mount_tag> /mnt/<mount_tag>
+  ```
+  For persistence, add to `/etc/fstab`:
+  ```bash
+  <mount_tag> /mnt/<mount_tag> 9p trans=virtio,version=9p2000.L 0 0
+  ```
+  **Workaround for Multiple Folders**: To share multiple folders despite the single-folder limitation, use a common parent folder with symbolic links:
+  ```bash
+  mkdir -p ~/Shared
+  ln -s ~/Downloads ~/Shared/Downloads
+  ln -s ~/Applications ~/Shared/Applications
+  ```
+  Share `~/Shared` via VirtIO 9P in Qemate:
+  ```bash
+  qemate shared add myvm ~/Shared shared_folder mapped-xattr
+  ```
+  In the Linux guest, mount the shared folder as above, and access `Downloads` and `Applications` under `/mnt/shared_folder`.
+
+- **Folder Sharing (Windows Guests)**:
+  Ensure Samba is installed on the host and the network type is `user` or `nat`. Map the network drive in Windows:
+  ```
+  \\<host_ip>\<mount_tag>
+  ```
+  Example:
+  ```
+  \\10.0.2.4\qemu
+  ```
+  **Workaround for Multiple Folders**: To share multiple folders, use a common parent folder with symbolic links on the Linux host:
+  ```bash
+  mkdir -p ~/Shared
+  ln -s ~/Downloads ~/Shared/Downloads
+  ln -s ~/Applications ~/Shared/Applications
+  ```
+  Share `~/Shared` via SMB in Qemate:
+  ```bash
+  qemate shared add myvm ~/Shared share0
+  ```
+  In Windows, navigate to `\\10.0.2.4\share0`. You will see:
+  - Downloads
+  - Applications
+  
+  If access fails:
+  1. **Enable "Insecure guest logons"** (Windows 10+):
+     - Run `gpedit.msc`, navigate to `Computer Configuration -> Administrative Templates -> Network -> Lanman Workstation`.
+     - Enable "Enable insecure guest logons".
+     - Reboot the VM.
+  2. **Registry Fix (Windows Home)**:
+     - Run `regedit`, navigate to `HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\LanmanWorkstation\Parameters`.
+     - Set DWORD `AllowInsecureGuestAuth` to `1`.
+     - Reboot the VM.
+  3. **Enable SMB 1.0/CIFS Client**:
+     - Control Panel -> Programs -> Turn Windows features on or off.
+     - Enable "SMB 1.0/CIFS File Sharing Support" -> "SMB 1.0/CIFS Client".
+     - Reboot the VM.
+  4. **Network/Firewall**:
+     - Set VM network to "Private".
+     - Temporarily disable Windows Defender Firewall to test connectivity.
+
+- **Port Forwarding Issues**:
+  Ensure host ports are not in use (`ss -tuln` or `netstat -tuln`). Privileged ports (≤1024) may require root privileges.
+
+- **Errors**: Check logs at `${HOME}/QVMs/<name>/logs/qemate_vm.log` or `${HOME}/QVMs/<name>/logs/error.log`.
 
 ## Contributing
 

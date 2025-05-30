@@ -2,6 +2,27 @@
 
 All notable changes to Qemate will be documented in this file.
 
+## [3.0.1] - 2025-05-25
+### Added
+- Audio backend prioritization: PipeWire (preferred), PulseAudio, ALSA for `--enable-audio`.
+- Limited shared folders to one per VM for both Linux (VirtIO 9P) and Windows (Samba/SMB).
+- Enhanced logging with `LOG_LEVEL` (DEBUG, INFO, WARNING, ERROR; default: INFO).
+
+### Changed
+- Completely rewritten from the ground up.
+- Breaking changes — not compatible with previous versions.
+- Improved network configuration with explicit TCP/UDP port forwarding support.
+
+### Fixed
+- Improved error handling for port conflicts and shared folder validation.
+- Fixed race conditions in PID file management using file locking.
+
+## [2.1.0] - 12/05/2025
+- Added shared folder functionality.
+
+## [2.0.1] - 09/05/2025
+- Fixed vm start error.
+- Fixed vm start --headless issue.
 
 ## [2.0.0] - 29/04/2025
 - Added audio support(requires PipeWire installed and running; audio is disabled if PipeWire is unavailable).

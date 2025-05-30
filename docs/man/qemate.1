@@ -1,4 +1,4 @@
-.TH QEMATE 1 "May 7, 2025" "Qemate 2.0.0" "User Commands"
+.TH QEMATE 1 "May 30, 2025" "Qemate 3.0.1" "User Commands"
 .SH NAME
 qemate \- Manage QEMU virtual machines from the command line
 .SH SYNOPSIS
@@ -11,60 +11,47 @@ qemate \- Manage QEMU virtual machines from the command line
 ]
 .SH DESCRIPTION
 .B Qemate
-is a streamlined command-line utility designed to simplify the management of QEMU virtual machines (VMs). It provides an intuitive interface for creating, starting, stopping, and deleting VMs, as well as configuring their networking. Qemate leverages QEMU with KVM acceleration for enhanced performance when supported by the host system.
+is a streamlined command-line utility for managing QEMU virtual machines (VMs). It simplifies VM creation, control, and configuration, leveraging QEMU with KVM acceleration for enhanced performance when supported by the host system.
 
 Qemate requires QEMU (specifically
 .B qemu-system-x86_64
 and
 .B qemu-img
-commands) and Bash (version 4.0 or higher) to be installed.
-Logging verbosity can be controlled by setting the
+commands, version 9.0 or higher) and Bash (version 5.0 or higher) to be installed. Optional dependencies include PipeWire (preferred), PulseAudio, or ALSA for audio support, and Samba for Windows folder sharing. Logging verbosity is controlled by the
 .B LOG_LEVEL
-environment variable (e.g., DEBUG, INFO, WARNING, ERROR).
+environment variable (DEBUG, INFO, WARNING, ERROR; default: INFO).
 .SH COMMANDS
-.SS "vm - Manage Virtual Machines"
 .TP
-.B create
-qemate vm create
-.I NAME
-[
-.I OPTIONS
-]
-.br
+.B vm
+Manage virtual machines.
+.RS
+.TP
+.B create NAME [--os-type TYPE] [--memory SIZE] [--cores N] [--disk-size SIZE] [--machine TYPE] [--enable-audio]
 Create a new VM with the specified name.
 
 Options:
 .RS
 .TP
-.B --memory VALUE
-Memory size (e.g., 4G, 2048M; default: 2G)
+.B --memory SIZE
+Memory size (e.g., 4G, 2048M; default: 2G for Linux, 4G for Windows).
 .TP
-.B --cores VALUE
-Number of CPU cores (default: 2)
+.B --cores N
+Number of CPU cores (1-64; default: 2 for Linux, 2 for Windows).
 .TP
-.B --disk-size VALUE
-Disk size (e.g., 20G; default: 20G)
+.B --disk-size SIZE
+Disk size (e.g., 20G; default: 20G for Linux, 60G for Windows).
 .TP
-.B --machine VALUE
-Machine type (e.g., pc-q35, pc-i440fx, virt; default: q35)
+.B --machine TYPE
+Machine type (e.g., q35,accel=kvm or pc,accel=tcg; default: q35,accel=kvm).
 .TP
-.B --iso PATH
-Path to an ISO file to start the VM with for installation.
-.TP
-.B --os-type VALUE
-Operating system type (e.g., linux, windows, bsd, other; default: linux). This influences some default settings like VirtIO.
+.B --os-type TYPE
+Operating system type (linux, windows; default: linux). Influences defaults like VirtIO and disk interface.
 .TP
 .B --enable-audio
-Enable audio for the VM (requires PipeWire).
+Enable audio for the VM (requires PipeWire, PulseAudio, or ALSA).
 .RE
 .TP
-.B start
-qemate vm start
-.I NAME
-[
-.I OPTIONS
-]
-.br
+.B start NAME [--iso PATH] [--headless]
 Start the VM with the given name.
 
 Options:
@@ -74,142 +61,130 @@ Options:
 Path to an ISO file to boot from (e.g., for installation or recovery).
 .TP
 .B --headless
-Run without a graphical console.
-.TP
-.B --extra-args "QEMU_OPTIONS"
-Additional QEMU command-line arguments (e.g., "-cpu host").
+Run without a graphical console (uses -display none).
 .RE
 .TP
-.B stop
-qemate vm stop
-.I NAME
-[
-.B --force
-]
-.br
+.B stop NAME [--force]
 Stop the VM. Use --force to terminate immediately (SIGKILL) if graceful shutdown (SIGTERM) fails.
 .TP
-.B status
-qemate vm status
-.I NAME
-.br
-Display the detailed status of the VM (e.g., state, memory, disk usage, network configuration).
+.B status NAME
+Display detailed status of the VM (e.g., state, memory, disk usage, network configuration).
 .TP
-.B delete
-qemate vm delete
-.I NAME
-[
-.B --force
-]
-.br
-Delete the VM and its associated files. Use --force to skip confirmation, stop a running VM, and delete a locked VM.
+.B delete NAME [--force]
+Delete the VM and its associated files. Use --force to skip confirmation.
 .TP
 .B list
-qemate vm list
-.br
 List all VMs with their name, status, and lock state.
 .TP
-.B wizard
-qemate vm wizard
-.br
-Interactively create a new VM by prompting for configuration options.
+.B resize NAME SIZE [--force]
+Resize the VM's disk to the specified size (e.g., 50G). Shrinking is not supported. Use --force to bypass safety checks (e.g., VM running or locked).
 .TP
-.B edit
-qemate vm edit
-.I NAME
-.br
-Edit the VM's configuration file using the editor defined by the $EDITOR environment variable (defaults to nano).
+.B configure NAME [SETTING VALUE]
+Configure VM settings or open the configuration file in the default editor ($EDITOR, defaults to nano if unset). Supported settings:
+.RS
 .TP
-.B lock
-qemate vm lock
-.I NAME
-.br
-Lock the VM to prevent accidental deletion.
+.B cores
+Set number of CPU cores (1-64).
 .TP
-.B unlock
-qemate vm unlock
-.I NAME
-.br
-Unlock the VM, allowing it to be deleted.
-.SS "net - Configure Networking"
+.B memory
+Set memory size (e.g., 4G, 2048M).
 .TP
-.B port
-Manage port forwards (VM must be stopped).
+.B audio
+Enable/disable audio (on/off, enable/disable, 1/0, true/false).
+.RE
+.RE
+.TP
+.B net
+Manage network configuration.
+.RS
+.TP
+.B type NAME [nat|user|none]
+Set or display the network type for the VM (default: user).
+.TP
+.B model NAME [e1000|virtio-net-pci|rtl8139]
+Set or display the network device model (default: virtio-net-pci for Linux, e1000 for Windows).
+.TP
+.B port add NAME HOST_PORT:GUEST_PORT[:tcp|udp]
+Add a port forward (e.g., 8080:80 or 8080:80:tcp). Protocol defaults to tcp.
+.TP
+.B port remove NAME HOST_PORT:GUEST_PORT[:tcp|udp]
+Remove a port forward (e.g., 8080:80 or 8080:80:tcp). Protocol defaults to tcp.
+.RE
+.TP
+.B shared
+Manage shared folders (limited to one folder per VM).
 .RS
 .TP
 .B list NAME
-List all port forwards for the VM.
+List the configured shared folder for the VM.
 .TP
-.B add NAME --host PORT --guest PORT [--proto PROTO]
-Add a port forward (e.g., --host 8080 --guest 80 --proto tcp). Protocol defaults to tcp.
+.B add NAME HOST_PATH [MOUNT_TAG [SECURITY_MODEL]]
+Add a single host folder to share with the VM (requires VirtIO for Linux, Samba for Windows). MOUNT_TAG is optional (defaults to an MD5-based tag). SECURITY_MODEL defaults to mapped-xattr.
 .TP
-.B remove NAME PORT[:PROTO]
-Remove a port forward (e.g., 8080 or 8080:tcp). Protocol defaults to tcp if not specified.
+.B remove NAME HOST_PATH_OR_MOUNT_TAG
+Remove the shared folder from the VM by its path or mount tag.
 .RE
 .TP
-.B set
-qemate net set
-.I NAME
-.I {nat|user|none}
-.br
-Set the network type for the VM (default: user).
+.B security
+Manage VM security settings.
+.RS
 .TP
-.B model
-qemate net model
-.I NAME
-[
-.I {e1000|virtio-net-pci}
-]
-.br
-Set or display the network device model (default: virtio-net-pci). If no model is provided, displays the current model.
-.SS "help - Display Help"
+.B lock NAME
+Lock the VM to prevent modifications or deletion.
+.TP
+.B unlock NAME
+Unlock the VM, allowing modifications or deletion.
+.RE
 .TP
 .B help
-qemate help
-.br
-Display the main help message. Use `qemate COMMAND help` for command-specific help.
-.SS "version - Show Version"
+Display the main help message.
 .TP
 .B version
-qemate version
-.br
-Display the program version (2.0.0).
+Display the program version (3.0.1).
 .SH EXAMPLES
-Create a VM with 4GB memory and 4 cores:
+Create a Linux VM with 4GB memory and 4 cores:
 .EX
-qemate vm create myvm --memory 4G --cores 4
+qemate vm create myvm --os-type linux --memory 4G --cores 4
 .EE
 Start a VM with an ISO in headless mode:
 .EX
 qemate vm start myvm --iso /path/to/install.iso --headless
 .EE
-Start a VM with custom QEMU arguments:
+Resize a VM's disk to 50G:
 .EX
-qemate vm start myvm --extra-args "-cpu host,+avx"
+qemate vm resize myvm 50G
 .EE
-Interactively create a VM:
+Configure VM CPU cores:
 .EX
-qemate vm wizard
+qemate vm configure myvm cores 4
 .EE
-Edit a VM's configuration:
+Enable audio for a VM:
 .EX
-qemate vm edit myvm
-.EE
-Lock a VM to prevent deletion:
-.EX
-qemate vm lock myvm
-.EE
-Unlock a VM to allow deletion:
-.EX
-qemate vm unlock myvm
+qemate vm configure myvm audio on
 .EE
 Add a TCP port forward from host 8080 to guest 80:
 .EX
-qemate net port add myvm --host 8080 --guest 80 --proto tcp
+qemate net port add myvm 8080:80
+.EE
+Add a UDP port forward from host 53 to guest 53:
+.EX
+qemate net port add myvm 53:53:udp
 .EE
 Set network type to NAT:
 .EX
-qemate net set myvm nat
+qemate net type myvm nat
+.EE
+Add a shared folder with a custom mount tag:
+.EX
+qemate shared add myvm ~/Documents mydocs mapped-xattr
+.EE
+Remove a shared folder by path:
+.EX
+qemate shared remove myvm ~/Documents
+.EE
+Remove a shared folder by mount tag:
+.EX
+qemate shared remove myvm mydocs
 .EE
 List all VMs:
 .EX
@@ -219,6 +194,10 @@ Show version:
 .EX
 qemate version
 .EE
+Lock a VM:
+.EX
+qemate security lock myvm
+.EE
 .SH FILES
 .TP
 .I ~/QVMs/VM_NAME/config
@@ -227,11 +206,14 @@ Configuration file for each VM. (Path customizable via $QEMATE_VM_DIR)
 .I ~/QVMs/VM_NAME/disk.qcow2
 Disk image for each VM.
 .TP
-.I ~/QVMs/VM_NAME/logs/error.log
+.I ~/QVMs/VM_NAME/logs/qemate_vm.log
 Per-VM log file. Verbosity controlled by the LOG_LEVEL environment variable.
 .TP
-.I ~/QVMs/VM_NAME/qemu.log
-Standard error output from the QEMU process itself when a VM is started.
+.I ~/QVMs/VM_NAME/logs/error.log
+Error log file for the VM.
+.TP
+.I ~/QVMs/VM_NAME/qemu.pid
+PID file for running VMs.
 .SH EXIT STATUS
 .TP
 0

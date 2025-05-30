@@ -3,10 +3,25 @@
 
 set -e
 
+# Check dependencies
+if ! command -v qemu-system-x86_64 &> /dev/null; then
+    echo "Error: qemu-system-x86_64 not found. Please install QEMU version 9.0 or higher."
+    exit 1
+fi
+
+if [[ "${BASH_VERSION%%.*}" -lt 5 ]]; then
+    echo "Error: Bash 5.0 or higher is required. Current version: $BASH_VERSION"
+    exit 1
+fi
+
+if ! [[ $(qemu-system-x86_64 --version 2> /dev/null | grep -oE '[0-9]+' | head -1) -ge 9 ]]; then
+    echo "Error: QEMU 9.0 or higher is required. Please upgrade QEMU."
+    exit 1
+fi
+
 # Default installation paths
 PREFIX="${PREFIX:-/usr/local}"
 BINDIR="${BINDIR:-$PREFIX/bin}"
-LIBDIR="${LIBDIR:-$PREFIX/share/qemate}"
 DOCDIR="${DOCDIR:-$PREFIX/share/doc/qemate}"
 MANDIR="${MANDIR:-$PREFIX/share/man/man1}"
 COMPLETIONDIR="${COMPLETIONDIR:-$PREFIX/share/bash-completion/completions}"

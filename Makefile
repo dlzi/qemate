@@ -1,5 +1,4 @@
 # Qemate Makefile
-
 # Default installation paths
 PREFIX ?= /usr/local
 BINDIR ?= $(PREFIX)/bin
@@ -20,7 +19,7 @@ install:
 	@install -d $(DESTDIR)$(COMPLETIONDIR)
 	
 	# Install the script
-	@install -m 755 src/qemate.sh $(DESTD IR)$(BINDIR)/qemate
+	@install -m 755 src/qemate.sh $(DESTDIR)$(BINDIR)/qemate
 	
 	# Install documentation
 	@install -m 644 README.md $(DESTDIR)$(DOCDIR)/
@@ -30,12 +29,41 @@ install:
 	
 	# Install bash completion
 	@install -m 644 completion/bash/qemate $(DESTDIR)$(COMPLETIONDIR)/
+	
+	@echo "Installation complete!"
 
 uninstall:
-	@echo "Running uninstall script..."
-	@./uninstall.sh
+	@echo "Uninstalling Qemate..."
+	@rm -f $(DESTDIR)$(BINDIR)/qemate
+	@rm -f $(DESTDIR)$(MANDIR)/qemate.1
+	@rm -f $(DESTDIR)$(COMPLETIONDIR)/qemate
+	@rm -rf $(DESTDIR)$(DOCDIR)
+	@echo "Uninstall complete!"
 
 clean:
-	@echo "Nothing to clean."
+	@echo "Cleaning up build artifacts..."
+	@rm -f *~
+	@rm -f *.bak
+	@rm -f *.log
+	@rm -f *.tar.gz
+	@rm -rf dist
+	@rm -rf build
+	@rm -rf __pycache__
+	@echo "Clean complete!"
 
-.PHONY: all install uninstall test clean
+# For makepkg/pacman package building cleanup
+pkgclean:
+	@echo "Cleaning up package build artifacts..."
+	@rm -rf src/qemate-*
+	@rm -rf pkg
+	@rm -f *.pkg.tar.zst
+	@rm -f *.pkg.tar.xz
+	@echo "Package clean complete!"
+
+distclean: clean pkgclean
+	@echo "Performing deep clean..."
+	@rm -rf .venv
+	@rm -rf .cache
+	@echo "Deep clean complete!"
+
+.PHONY: all install uninstall clean pkgclean distclean

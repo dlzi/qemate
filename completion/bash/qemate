@@ -12,35 +12,52 @@ _qemate_completion() {
     local VM_DIR="${QEMATE_VM_DIR:-${HOME}/QVMs}"
 
     # Main commands
-    local commands="vm net help version"
+    local commands="vm net shared security help version"
 
     # Subcommands
-    local vm_subcommands="create start stop status delete list wizard edit lock unlock"
-    local net_subcommands="port set model"
-    local net_port_subcommands="list add remove"
+    local vm_subcommands="create start stop delete resize list status configure"
+    local net_subcommands="type model port"
+    local net_port_subcommands="add remove"
+    local shared_subcommands="add remove list"
+    local security_subcommands="lock unlock"
 
     # Options for various commands
-    local vm_create_opts="--memory --cores --disk-size --machine --iso --os-type --enable-audio"
-    local vm_start_opts="--iso --headless --extra-args"
+    local vm_create_opts="--memory --cores --disk-size --machine --os-type --enable-audio"
+    local vm_start_opts="--headless --iso"
     local vm_stop_opts="--force"
-    local vm_delete_opts="--force" # Same as stop, but distinct for clarity
-    local net_port_add_opts="--host --guest --proto"
+    local vm_delete_opts="--force"
+    local vm_resize_opts="--force"
+    local vm_configure_opts="cores memory audio"
+    local net_port_add_opts=""
+    local shared_add_opts=""
 
     # Values for specific options
-    local vm_create_machine_values="pc-q35 pc-i440fx virt" # From parse_vm_create_args in qemate.sh
-    local vm_create_os_type_values="linux windows"         # From parse_vm_create_args in qemate.sh
-    local net_set_type_values="nat user none"              # From VALID_NETWORK_TYPES in qemate.sh
-    local net_model_values="e1000 virtio-net-pci"          # From VALID_NETWORK_MODELS in qemate.sh
+    local vm_create_os_type_values="linux windows"
+    local vm_create_machine_values="q35,accel=kvm pc,accel=tcg"
+    local net_type_values="user nat none"
+    local net_model_values="virtio-net-pci e1000 rtl8139"
     local net_proto_values="tcp udp"
+    local shared_security_model_values="mapped-xattr passthrough"
 
     # Helper function to get VM names
     _get_vm_names() {
         if [[ -d "$VM_DIR" ]]; then
-            # Find directories inside VM_DIR that are actual VMs (contain a 'config' file)
-            # and then extract the base name (VM name).
-            find "$VM_DIR" -maxdepth 2 -mindepth 2 -type f -name "config" -print0 2> /dev/null | while IFS= read -r -d $'\0' cfg_file; do
-                basename "$(dirname "$cfg_file")"
-            done | sort -u
+            find "$VM_DIR" -maxdepth 1 -type d -not -path "$VM_DIR" -exec basename {} \; 2> /dev/null | sort -u
+        fi
+    }
+
+    # Helper function to get mount tags for a VM
+    _get_mount_tags() {
+        local vm_name="$1"
+        local config_file="$VM_DIR/$vm_name/config"
+        if [[ -f "$config_file" ]]; then
+            local shared_folders
+            shared_folders=$(grep '^SHARED_FOLDERS=' "$config_file" | cut -d'=' -f2- | tr -d '"' | tr ',' '\n')
+            if [[ -n "$shared_folders" ]]; then
+                echo "$shared_folders" | while IFS=':' read -r _ tag _; do
+                    [[ -n "$tag" ]] && echo "$tag"
+                done
+            fi
         fi
     }
 
@@ -55,14 +72,13 @@ _qemate_completion() {
         vm)
             if [[ "$cword" -eq 2 ]]; then
                 COMPREPLY=($(compgen -W "$vm_subcommands" -- "$cur"))
-            else # cword > 2, handling arguments for vm subcommands
+            else
                 local vm_cmd="${words[2]}"
                 case "$vm_cmd" in
                     create)
                         if [[ "$cword" -eq 3 ]]; then
-                            # Expecting VM name, which is free text
                             COMPREPLY=()
-                        else # Options for vm create
+                        else
                             if [[ "$prev" == "--iso" ]]; then
                                 COMPREPLY=($(compgen -f -X '!*.iso' -- "$cur"))
                             elif [[ "$prev" == "--machine" ]]; then
@@ -70,7 +86,7 @@ _qemate_completion() {
                             elif [[ "$prev" == "--os-type" ]]; then
                                 COMPREPLY=($(compgen -W "$vm_create_os_type_values" -- "$cur"))
                             elif [[ "$prev" == "--memory" || "$prev" == "--cores" || "$prev" == "--disk-size" ]]; then
-                                COMPREPLY=() # Expecting a value
+                                COMPREPLY=()
                             else
                                 COMPREPLY=($(compgen -W "$vm_create_opts" -- "$cur"))
                             fi
@@ -79,11 +95,9 @@ _qemate_completion() {
                     start)
                         if [[ "$cword" -eq 3 ]]; then
                             COMPREPLY=($(compgen -W "$(_get_vm_names)" -- "$cur"))
-                        else # Options for vm start
+                        else
                             if [[ "$prev" == "--iso" ]]; then
                                 COMPREPLY=($(compgen -f -X '!*.iso' -- "$cur"))
-                            elif [[ "$prev" == "--extra-args" ]]; then
-                                COMPREPLY=() # Expecting a value
                             else
                                 COMPREPLY=($(compgen -W "$vm_start_opts" -- "$cur"))
                             fi
@@ -92,14 +106,31 @@ _qemate_completion() {
                     stop | delete)
                         if [[ "$cword" -eq 3 ]]; then
                             COMPREPLY=($(compgen -W "$(_get_vm_names)" -- "$cur"))
-                        elif [[ "$cword" -eq 4 ]]; then
-                            # Suggest --force if a VM name has been provided
-                            if [[ -n "${words[3]}" && "$(_get_vm_names | grep -x "${words[3]}")" ]]; then
-                                if [[ "$vm_cmd" == "stop" ]]; then
-                                    COMPREPLY=($(compgen -W "$vm_stop_opts" -- "$cur"))
-                                else # delete
-                                    COMPREPLY=($(compgen -W "$vm_delete_opts" -- "$cur"))
-                                fi
+                        elif [[ "$cword" -eq 4 && -n "${words[3]}" && "$(_get_vm_names | grep -x "${words[3]}")" ]]; then
+                            COMPREPLY=($(compgen -W "${vm_cmd== "stop" && "$vm_stop_opts" || "$vm_delete_opts"}" -- "$cur"))
+                        else
+                            COMPREPLY=()
+                        fi
+                        ;;
+                    resize)
+                        if [[ "$cword" -eq 3 ]]; then
+                            COMPREPLY=($(compgen -W "$(_get_vm_names)" -- "$cur"))
+                        elif [[ "$cword" -eq 4 && -n "${words[3]}" && "$(_get_vm_names | grep -x "${words[3]}")" ]]; then
+                            COMPREPLY=($(compgen -W "$vm_resize_opts" -- "$cur"))
+                        elif [[ "$cword" -eq 4 || "$cword" -eq 5 ]]; then
+                            COMPREPLY=()
+                        else
+                            COMPREPLY=()
+                        fi
+                        ;;
+                    status | configure)
+                        if [[ "$cword" -eq 3 ]]; then
+                            COMPREPLY=($(compgen -W "$(_get_vm_names)" -- "$cur"))
+                        elif [[ "$vm_cmd" == "configure" && "$cword" -eq 4 ]]; then
+                            COMPREPLY=($(compgen -W "$vm_configure_opts" -- "$cur"))
+                        elif [[ "$vm_cmd" == "configure" && "$cword" -eq 5 ]]; then
+                            if [[ "$prev" == "audio" ]]; then
+                                COMPREPLY=($(compgen -W "on off enable disable 1 0 true false" -- "$cur"))
                             else
                                 COMPREPLY=()
                             fi
@@ -107,15 +138,8 @@ _qemate_completion() {
                             COMPREPLY=()
                         fi
                         ;;
-                    status | edit | lock | unlock)
-                        if [[ "$cword" -eq 3 ]]; then
-                            COMPREPLY=($(compgen -W "$(_get_vm_names)" -- "$cur"))
-                        else
-                            COMPREPLY=() # These subcommands don't take further options after VM name
-                        fi
-                        ;;
-                    list | wizard)
-                        COMPREPLY=() # These subcommands take no arguments
+                    list)
+                        COMPREPLY=()
                         ;;
                 esac
             fi
@@ -123,58 +147,19 @@ _qemate_completion() {
         net)
             if [[ "$cword" -eq 2 ]]; then
                 COMPREPLY=($(compgen -W "$net_subcommands" -- "$cur"))
-            else # cword > 2, handling arguments for net subcommands
+            else
                 local net_cmd="${words[2]}"
                 case "$net_cmd" in
-                    port)
-                        if [[ "$cword" -eq 3 ]]; then
-                            COMPREPLY=($(compgen -W "$net_port_subcommands" -- "$cur"))
-                        else # Arguments for net port <subcommand>
-                            local port_cmd="${words[3]}"
-                            case "$port_cmd" in
-                                list)
-                                    if [[ "$cword" -eq 4 ]]; then
-                                        COMPREPLY=($(compgen -W "$(_get_vm_names)" -- "$cur"))
-                                    else
-                                        COMPREPLY=()
-                                    fi
-                                    ;;
-                                remove)
-                                    if [[ "$cword" -eq 4 ]]; then
-                                        COMPREPLY=($(compgen -W "$(_get_vm_names)" -- "$cur"))
-                                    elif [[ "$cword" -eq 5 ]]; then
-                                        # Expecting port_spec (e.g., 8080 or 8080:tcp), free text
-                                        COMPREPLY=()
-                                    else
-                                        COMPREPLY=()
-                                    fi
-                                    ;;
-                                add)
-                                    if [[ "$cword" -eq 4 ]]; then
-                                        COMPREPLY=($(compgen -W "$(_get_vm_names)" -- "$cur"))
-                                    else # Options for net port add
-                                        if [[ "$prev" == "--proto" ]]; then
-                                            COMPREPLY=($(compgen -W "$net_proto_values" -- "$cur"))
-                                        elif [[ "$prev" == "--host" || "$prev" == "--guest" ]]; then
-                                            COMPREPLY=() # Expecting a port number
-                                        else
-                                            COMPREPLY=($(compgen -W "$net_port_add_opts" -- "$cur"))
-                                        fi
-                                    fi
-                                    ;;
-                            esac
-                        fi
-                        ;;
-                    set) # qemate net set <vm_name> <type>
+                    type)
                         if [[ "$cword" -eq 3 ]]; then
                             COMPREPLY=($(compgen -W "$(_get_vm_names)" -- "$cur"))
                         elif [[ "$cword" -eq 4 ]]; then
-                            COMPREPLY=($(compgen -W "$net_set_type_values" -- "$cur"))
+                            COMPREPLY=($(compgen -W "$net_type_values" -- "$cur"))
                         else
                             COMPREPLY=()
                         fi
                         ;;
-                    model) # qemate net model <vm_name> [model_type]
+                    model)
                         if [[ "$cword" -eq 3 ]]; then
                             COMPREPLY=($(compgen -W "$(_get_vm_names)" -- "$cur"))
                         elif [[ "$cword" -eq 4 ]]; then
@@ -183,11 +168,79 @@ _qemate_completion() {
                             COMPREPLY=()
                         fi
                         ;;
+                    port)
+                        if [[ "$cword" -eq 3 ]]; then
+                            COMPREPLY=($(compgen -W "$net_port_subcommands" -- "$cur"))
+                        else
+                            local port_cmd="${words[3]}"
+                            case "$port_cmd" in
+                                add | remove)
+                                    if [[ "$cword" -eq 4 ]]; then
+                                        COMPREPLY=($(compgen -W "$(_get_vm_names)" -- "$cur"))
+                                    elif [[ "$cword" -eq 5 ]]; then
+                                        COMPREPLY=()
+                                    else
+                                        COMPREPLY=()
+                                    fi
+                                    ;;
+                            esac
+                        fi
+                        ;;
                 esac
             fi
             ;;
+        shared)
+            if [[ "$cword" -eq 2 ]]; then
+                COMPREPLY=($(compgen -W "$shared_subcommands" -- "$cur"))
+            else
+                local shared_cmd="${words[2]}"
+                case "$shared_cmd" in
+                    list)
+                        if [[ "$cword" -eq 3 ]]; then
+                            COMPREPLY=($(compgen -W "$(_get_vm_names)" -- "$cur"))
+                        else
+                            COMPREPLY=()
+                        fi
+                        ;;
+                    add)
+                        if [[ "$cword" -eq 3 ]]; then
+                            COMPREPLY=($(compgen -W "$(_get_vm_names)" -- "$cur"))
+                        elif [[ "$cword" -eq 4 ]]; then
+                            COMPREPLY=($(compgen -d -- "$cur"))
+                        elif [[ "$cword" -eq 5 ]]; then
+                            COMPREPLY=()
+                        elif [[ "$cword" -eq 6 ]]; then
+                            COMPREPLY=($(compgen -W "$shared_security_model_values" -- "$cur"))
+                        else
+                            COMPREPLY=()
+                        fi
+                        ;;
+                    remove)
+                        if [[ "$cword" -eq 3 ]]; then
+                            COMPREPLY=($(compgen -W "$(_get_vm_names)" -- "$cur"))
+                        elif [[ "$cword" -eq 4 ]]; then
+                            # Offer directories or mount tags
+                            local vm_name="${words[3]}"
+                            COMPREPLY=($(compgen -d -- "$cur"))
+                            COMPREPLY+=($(_get_mount_tags "$vm_name"))
+                        else
+                            COMPREPLY=()
+                        fi
+                        ;;
+                esac
+            fi
+            ;;
+        security)
+            if [[ "$cword" -eq 2 ]]; then
+                COMPREPLY=($(compgen -W "$security_subcommands" -- "$cur"))
+            elif [[ "$cword" -eq 3 ]]; then
+                COMPREPLY=($(compgen -W "$(_get_vm_names)" -- "$cur"))
+            else
+                COMPREPLY=()
+            fi
+            ;;
         help | version)
-            COMPREPLY=() # These commands take no arguments
+            COMPREPLY=()
             ;;
     esac
 

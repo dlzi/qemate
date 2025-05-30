@@ -50,4 +50,4 @@ bh_unicode_properties.cache
 GitHub.sublime-settings
 
 # AI Repo Packer file
-output_1.txt
+packed_repo_content_*
