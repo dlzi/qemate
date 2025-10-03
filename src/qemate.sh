@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # qemate - Streamlined QEMU Virtual Machine Management Utility.
-# Version: 3.0.1
+# Version: 3.0.2
 
 # Exit on error, undefined variable, or pipe failure.
 set -euo pipefail
