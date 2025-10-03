@@ -1,4 +1,4 @@
-.TH QEMATE 1 "May 30, 2025" "Qemate 3.0.1" "User Commands"
+.TH QEMATE 1 "October 3, 2025" "Qemate 3.0.1" "User Commands"
 .SH NAME
 qemate \- Manage QEMU virtual machines from the command line
 .SH SYNOPSIS
@@ -17,7 +17,7 @@ Qemate requires QEMU (specifically
 .B qemu-system-x86_64
 and
 .B qemu-img
-commands, version 9.0 or higher) and Bash (version 5.0 or higher) to be installed. Optional dependencies include PipeWire (preferred), PulseAudio, or ALSA for audio support, and Samba for Windows folder sharing. Logging verbosity is controlled by the
+commands, version 9.0 or higher) and Bash (version 5.0 or higher) to be installed. Optional dependencies include virtiofsd for VirtioFS shared folders, PipeWire (preferred), PulseAudio, or ALSA for audio support, and Samba for Windows folder sharing. Logging verbosity is controlled by the
 .B LOG_LEVEL
 environment variable (DEBUG, INFO, WARNING, ERROR; default: INFO).
 .SH COMMANDS
@@ -36,10 +36,10 @@ Options:
 Memory size (e.g., 4G, 2048M; default: 2G for Linux, 4G for Windows).
 .TP
 .B --cores N
-Number of CPU cores (1-64; default: 2 for Linux, 2 for Windows).
+Number of CPU cores (1-64; default: 2 for both Linux and Windows).
 .TP
 .B --disk-size SIZE
-Disk size (e.g., 20G; default: 20G for Linux, 60G for Windows).
+Disk size (e.g., 20G; default: 40G for Linux, 60G for Windows).
 .TP
 .B --machine TYPE
 Machine type (e.g., q35,accel=kvm or pc,accel=tcg; default: q35,accel=kvm).
@@ -68,7 +68,7 @@ Run without a graphical console (uses -display none).
 Stop the VM. Use --force to terminate immediately (SIGKILL) if graceful shutdown (SIGTERM) fails.
 .TP
 .B status NAME
-Display detailed status of the VM (e.g., state, memory, disk usage, network configuration).
+Display detailed status of the VM (e.g., state, memory, disk usage, network configuration, USB devices, shared folders).
 .TP
 .B delete NAME [--force]
 Delete the VM and its associated files. Use --force to skip confirmation.
@@ -105,24 +105,51 @@ Set or display the network type for the VM (default: user).
 Set or display the network device model (default: virtio-net-pci for Linux, e1000 for Windows).
 .TP
 .B port add NAME HOST_PORT:GUEST_PORT[:tcp|udp]
-Add a port forward (e.g., 8080:80 or 8080:80:tcp). Protocol defaults to tcp.
+Add a port forward (e.g., 8080:80 or 8080:80:tcp or 8080:80:udp). Protocol defaults to tcp if not specified.
 .TP
 .B port remove NAME HOST_PORT:GUEST_PORT[:tcp|udp]
-Remove a port forward (e.g., 8080:80 or 8080:80:tcp). Protocol defaults to tcp.
+Remove a port forward (e.g., 8080:80 or 8080:80:tcp). Protocol defaults to tcp if not specified.
 .RE
 .TP
 .B shared
-Manage shared folders (limited to one folder per VM).
+Manage shared folders.
 .RS
 .TP
 .B list NAME
-List the configured shared folder for the VM.
+List configured shared folders for the VM with mounting instructions.
 .TP
-.B add NAME HOST_PATH [MOUNT_TAG [SECURITY_MODEL]]
-Add a single host folder to share with the VM (requires VirtIO for Linux, Samba for Windows). MOUNT_TAG is optional (defaults to an MD5-based tag). SECURITY_MODEL defaults to mapped-xattr.
+.B add NAME HOST_PATH [MOUNT_TAG [TYPE]]
+Add a host folder to share with the VM. MOUNT_TAG is optional (defaults to an MD5-based tag). TYPE can be:
+.RS
+.TP
+.B virtiofs
+VirtioFS (default for Linux, requires virtiofsd daemon, best performance)
+.TP
+.B 9p
+9P filesystem (Linux alternative, no additional daemon required)
+.TP
+.B smb
+SMB/Samba (Windows only, requires Samba on host)
+.RE
 .TP
 .B remove NAME HOST_PATH_OR_MOUNT_TAG
 Remove the shared folder from the VM by its path or mount tag.
+.RE
+.TP
+.B usb
+Manage USB device passthrough.
+.RS
+.TP
+.B list NAME
+List configured USB passthrough devices for the VM.
+.TP
+.B add NAME VENDOR_ID:PRODUCT_ID
+Add a USB device for passthrough using vendor and product IDs (e.g., 046d:c52b). Use
+.B lsusb
+to find device IDs. May require udev rules or running as root.
+.TP
+.B remove NAME VENDOR_ID:PRODUCT_ID
+Remove a USB device from passthrough configuration.
 .RE
 .TP
 .B security
@@ -164,7 +191,7 @@ qemate vm configure myvm audio on
 .EE
 Add a TCP port forward from host 8080 to guest 80:
 .EX
-qemate net port add myvm 8080:80
+qemate net port add myvm 8080:80:tcp
 .EE
 Add a UDP port forward from host 53 to guest 53:
 .EX
@@ -174,9 +201,17 @@ Set network type to NAT:
 .EX
 qemate net type myvm nat
 .EE
-Add a shared folder with a custom mount tag:
+Add a VirtioFS shared folder (Linux, recommended):
 .EX
-qemate shared add myvm ~/Documents mydocs mapped-xattr
+qemate shared add myvm ~/Documents mydocs virtiofs
+.EE
+Add a 9p shared folder (Linux, alternative):
+.EX
+qemate shared add myvm ~/Downloads downloads 9p
+.EE
+Add an SMB shared folder (Windows):
+.EX
+qemate shared add myvm ~/Shared winshare smb
 .EE
 Remove a shared folder by path:
 .EX
@@ -185,6 +220,18 @@ qemate shared remove myvm ~/Documents
 Remove a shared folder by mount tag:
 .EX
 qemate shared remove myvm mydocs
+.EE
+Add a USB device for passthrough:
+.EX
+qemate usb add myvm 046d:c52b
+.EE
+Remove a USB device from passthrough:
+.EX
+qemate usb remove myvm 046d:c52b
+.EE
+List USB devices for a VM:
+.EX
+qemate usb list myvm
 .EE
 List all VMs:
 .EX
@@ -204,16 +251,100 @@ qemate security lock myvm
 Configuration file for each VM. (Path customizable via $QEMATE_VM_DIR)
 .TP
 .I ~/QVMs/VM_NAME/disk.qcow2
-Disk image for each VM.
+Disk image for each VM (qcow2 format).
 .TP
 .I ~/QVMs/VM_NAME/logs/qemate_vm.log
 Per-VM log file. Verbosity controlled by the LOG_LEVEL environment variable.
 .TP
 .I ~/QVMs/VM_NAME/logs/error.log
-Error log file for the VM.
+Error log file for QEMU errors.
+.TP
+.I ~/QVMs/VM_NAME/logs/virtiofsd_TAG.log
+Log file for VirtioFS daemon (one per shared folder).
 .TP
 .I ~/QVMs/VM_NAME/qemu.pid
 PID file for running VMs.
+.TP
+.I ~/QVMs/VM_NAME/sockets/
+Directory containing Unix sockets for VirtioFS daemons and PID files.
+.SH ENVIRONMENT
+.TP
+.B LOG_LEVEL
+Controls logging verbosity: DEBUG, INFO (default), WARNING, or ERROR.
+.TP
+.B EDITOR
+Editor to use when running
+.B qemate vm configure
+without arguments. Defaults to nano, then vi.
+.TP
+.B QEMATE_VM_DIR
+Custom VM directory location. Defaults to ~/QVMs.
+.SH SHARED FOLDERS
+.SS Linux Guests - VirtioFS (Recommended)
+VirtioFS provides the best performance and full POSIX semantics. Requires virtiofsd daemon on host:
+.PP
+Mount in guest:
+.EX
+sudo mkdir -p /mnt/MOUNT_TAG
+sudo mount -t virtiofs MOUNT_TAG /mnt/MOUNT_TAG
+.EE
+.PP
+For automatic mounting, add to /etc/fstab:
+.EX
+MOUNT_TAG /mnt/MOUNT_TAG virtiofs defaults 0 0
+.EE
+.SS Linux Guests - 9P (Alternative)
+9P filesystem is an alternative that doesn't require virtiofsd:
+.PP
+Mount in guest:
+.EX
+sudo mkdir -p /mnt/MOUNT_TAG
+sudo mount -t 9p -o trans=virtio,version=9p2000.L MOUNT_TAG /mnt/MOUNT_TAG
+.EE
+.PP
+For automatic mounting, add to /etc/fstab:
+.EX
+MOUNT_TAG /mnt/MOUNT_TAG 9p trans=virtio,version=9p2000.L 0 0
+.EE
+.SS Windows Guests - SMB
+Windows guests use SMB/Samba for folder sharing. Access via File Explorer:
+.EX
+\\\\10.0.2.4\\qemu
+.EE
+.PP
+If access fails, enable "Insecure guest logons" in Windows or adjust firewall settings. See README for detailed troubleshooting steps.
+.SH USB PASSTHROUGH
+USB passthrough allows direct access to host USB devices from the guest. Requires proper permissions:
+.PP
+1. Find device ID:
+.EX
+lsusb
+.EE
+.PP
+2. Add device to VM:
+.EX
+qemate usb add myvm VENDOR:PRODUCT
+.EE
+.PP
+3. If permission denied, create udev rule in /etc/udev/rules.d/99-qemu-usb.rules:
+.EX
+SUBSYSTEM=="usb", ATTR{idVendor}=="VENDOR", ATTR{idProduct}=="PRODUCT", MODE="0666"
+.EE
+.PP
+4. Reload udev:
+.EX
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+.EE
+.PP
+5. Alternative quick solution - Run qemate with sudo (preserves environment):
+.EX
+sudo -E qemate vm start myvm
+.EE
+.PP
+The
+.B -E
+flag preserves your environment variables (including $HOME) so the VM is still managed in your user directory.
 .SH EXIT STATUS
 .TP
 0
@@ -221,7 +352,14 @@ Success
 .TP
 1
 Failure
+.SH BUGS
+Report bugs to: https://github.com/dlzi/qemate/issues
 .SH AUTHOR
 Daniel Zilli
 .SH LICENSE
 MIT License
+.SH SEE ALSO
+.BR qemu-system-x86_64 (1),
+.BR qemu-img (1),
+.BR virtiofsd (1),
+.BR lsusb (8)

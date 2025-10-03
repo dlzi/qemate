@@ -250,6 +250,7 @@ ENABLE_AUDIO=${ENABLE_AUDIO:-0}
 PORT_FORWARDING_ENABLED=${PORT_FORWARDING_ENABLED:-0}
 PORT_FORWARDS="${PORT_FORWARDS:-}"
 SHARED_FOLDERS="${SHARED_FOLDERS:-}"
+USB_DEVICES="${USB_DEVICES:-}"
 EOF
     log_message "DEBUG" "Configuration saved for VM: $vm_name" "$vm_name"
     flock -u 200
@@ -610,16 +611,16 @@ start() {
     if [[ -n "${SHARED_FOLDERS:-}" ]]; then
         log_message "DEBUG" "SHARED_FOLDERS is set: '${SHARED_FOLDERS}', OS_TYPE: '$OS_TYPE'" "$vm_name"
         if [[ "$OS_TYPE" == "linux" ]]; then
-            # Linux uses virtio-9p, which needs -fsdev and -device options
             if [[ "$ENABLE_VIRTIO" == "1" ]]; then
-                log_message "DEBUG" "Configuring shared folders for Linux-like VM '$vm_name' using virtio-9p" "$vm_name"
-                configure_linux_shared_folders "$vm_name" qemu_cmd # This function adds -fsdev and -device options
+                # Configure both VirtioFS and 9p shared folders based on their type
+                log_message "DEBUG" "Configuring shared folders for Linux VM '$vm_name'" "$vm_name"
+                configure_virtiofs_shared_folders "$vm_name" qemu_cmd
+                configure_linux_shared_folders "$vm_name" qemu_cmd
             else
                 log_message "WARNING" "Shared folders for Linux VM '$vm_name' require VirtIO to be enabled. Skipping shared folder configuration." "$vm_name"
             fi
         elif [[ "$OS_TYPE" == "windows" ]]; then
-            # Windows SMB sharing is now handled within configure_network when NETWORK_TYPE is 'user' or 'nat'.
-            # No separate QEMU options are added here for Windows SMB.
+            # Windows SMB sharing is handled within configure_network when NETWORK_TYPE is 'user' or 'nat'.
             if [[ "$NETWORK_TYPE" != "user" && "$NETWORK_TYPE" != "nat" ]]; then
                 log_message "WARNING" "Windows SMB shared folders are only configured with 'user' or 'nat' network types. Current type: $NETWORK_TYPE" "$vm_name"
             else
@@ -630,6 +631,54 @@ start() {
         fi
     else
         log_message "DEBUG" "No SHARED_FOLDERS defined for VM '$vm_name'." "$vm_name"
+    fi
+
+    # Configure USB controller and passthrough devices
+
+    # Configure USB controller (always add it for better compatibility)
+    qemu_cmd+=("-device" "qemu-xhci,id=xhci")
+    log_message "DEBUG" "Added USB 3.0 (xHCI) controller" "$vm_name"
+
+    # Configure USB passthrough devices if any
+    if [[ -n "${USB_DEVICES:-}" ]]; then
+        log_message "DEBUG" "Configuring USB passthrough devices: '${USB_DEVICES}'" "$vm_name"
+        
+        IFS=',' read -ra devices_to_pass <<< "$USB_DEVICES"
+        for device_spec in "${devices_to_pass[@]}"; do
+            if [[ "$device_spec" =~ ^([0-9a-fA-F]{4}):([0-9a-fA-F]{4})$ ]]; then
+                local vendor_id="${BASH_REMATCH[1]}"
+                local product_id="${BASH_REMATCH[2]}"
+                
+                # Verify device exists on host
+                if command -v lsusb &> /dev/null; then
+                    if ! lsusb -d "${vendor_id}:${product_id}" &> /dev/null; then
+                        log_message "WARNING" "USB device ${vendor_id}:${product_id} not found on host. Skipping." "$vm_name"
+                        continue
+                    fi
+                    
+                    # Check device permissions
+                    local device_path=$(find /dev/bus/usb -type c 2>/dev/null | while read dev; do
+                        local dev_info=$(udevadm info --query=all --name="$dev" 2>/dev/null | grep -i "ID_VENDOR_ID\|ID_MODEL_ID")
+                        if echo "$dev_info" | grep -qi "ID_VENDOR_ID=${vendor_id}" && \
+                           echo "$dev_info" | grep -qi "ID_MODEL_ID=${product_id}"; then
+                            echo "$dev"
+                            break
+                        fi
+                    done)
+                    
+                    if [[ -n "$device_path" ]] && [[ ! -r "$device_path" || ! -w "$device_path" ]]; then
+                        log_message "WARNING" "USB device ${vendor_id}:${product_id} exists but may not be accessible (insufficient permissions on $device_path)" "$vm_name"
+                        log_message "WARNING" "You may need to run as root or configure udev rules. See: https://wiki.archlinux.org/title/QEMU#USB_passthrough" "$vm_name"
+                    fi
+                fi
+                
+                # Add the device with bus=xhci to attach it to the USB 3.0 controller
+                qemu_cmd+=("-device" "usb-host,vendorid=0x$vendor_id,productid=0x$product_id,bus=xhci.0")
+                log_message "INFO" "Added USB passthrough device: $vendor_id:$product_id" "$vm_name"
+            else
+                log_message "WARNING" "Invalid USB device format in config: '$device_spec'. Expected VVVV:PPPP format. Skipping." "$vm_name"
+            fi
+        done
     fi
 
     # Memory options
@@ -728,9 +777,19 @@ status() {
     fi
 
     if [[ -n "$SHARED_FOLDERS" ]]; then
-        echo "Shared Folders: $SHARED_FOLDERS"
+        echo "Shared Folders: yes"
     else
         echo "Shared Folders: no"
+    fi
+
+    if [[ -n "$USB_DEVICES" ]]; then
+        echo "USB Passthrough Devices:"
+        IFS=',' read -ra devices <<< "$USB_DEVICES"
+        for device in "${devices[@]}"; do
+            echo "  - $device"
+        done
+    else
+        echo "USB Passthrough Devices: no"
     fi
 
     echo ""
@@ -744,6 +803,21 @@ status() {
         if command -v ps &> /dev/null; then
             echo "Process Info:"
             ps -p "$pid" -o pid,ppid,pcpu,pmem,etime,cmd --no-headers 2> /dev/null || echo "  Process info unavailable"
+        fi
+        
+        # Show virtiofsd processes if any
+        local virtiofs_count=0
+        for virtiofs_pid_file in "$VM_DIR/$vm_name/sockets"/virtiofs_*.sock.pid; do
+            if [[ -f "$virtiofs_pid_file" ]]; then
+                local virtiofs_pid
+                virtiofs_pid=$(cat "$virtiofs_pid_file")
+                if kill -0 "$virtiofs_pid" 2>/dev/null; then
+                    ((virtiofs_count++))
+                fi
+            fi
+        done
+        if [[ "$virtiofs_count" -gt 0 ]]; then
+            echo "VirtioFS daemons: $virtiofs_count running"
         fi
     else
         echo "Status: Stopped"
@@ -830,6 +904,19 @@ stop() {
 
     # Clean up PID file
     rm -f "$pidfile"
+
+    # Stop any virtiofsd daemons
+    for virtiofs_pid_file in "$VM_DIR/$vm_name/sockets"/virtiofs_*.sock.pid; do
+        if [[ -f "$virtiofs_pid_file" ]]; then
+            local virtiofs_pid
+            virtiofs_pid=$(cat "$virtiofs_pid_file")
+            if kill -0 "$virtiofs_pid" 2>/dev/null; then
+                log_message "DEBUG" "Stopping virtiofsd daemon (PID: $virtiofs_pid)" "$vm_name"
+                kill "$virtiofs_pid" 2>/dev/null
+            fi
+            rm -f "$virtiofs_pid_file"
+        fi
+    done
 
     # Clean up sockets
     rm -f "$VM_DIR/$vm_name/sockets"/*.sock
@@ -1116,7 +1203,7 @@ configure() {
             ;;
         *)
             echo "Available configuration settings:"
-            echo "  cores    - Number of CPU cores (1-16)"
+            echo "  cores    - Number of CPU cores (1-64)"
             echo "  memory   - Memory allocation (e.g., 2G, 1024M)"
             echo "  audio    - Enable/disable audio (on/off)"
             echo ""
@@ -1555,6 +1642,212 @@ manage_network_ports() {
 # SHARED FOLDERS
 # ============================================================================
 
+start_virtiofs_daemon() {
+    local vm_name="$1"
+    local folder_path="$2"
+    local socket_path="$3"
+    local tag="$4"
+
+    # Resolve virtiofsd path
+    local virtiofsd_path
+    if command -v virtiofsd &> /dev/null; then
+        virtiofsd_path=$(command -v virtiofsd)
+    elif [ -x /usr/lib/virtiofsd ]; then
+        virtiofsd_path="/usr/lib/virtiofsd"
+    else
+        log_message "ERROR" "virtiofsd not found. Please install virtiofsd to use VirtioFS shared folders" "$vm_name"
+        return 1
+    fi
+
+    # Check if shared folder exists and is accessible
+    if [[ ! -d "$folder_path" ]]; then
+        log_message "ERROR" "Shared folder does not exist: $folder_path" "$vm_name"
+        return 1
+    fi
+    if [[ ! -r "$folder_path" ]] || [[ ! -w "$folder_path" ]]; then
+        log_message "ERROR" "Shared folder is not readable/writable: $folder_path" "$vm_name"
+        return 1
+    fi
+
+    # Ensure socket directory exists and is writable
+    local socket_dir=$(dirname "$socket_path")
+    if [[ ! -d "$socket_dir" ]]; then
+        log_message "DEBUG" "Creating socket directory: $socket_dir" "$vm_name"
+        mkdir -p "$socket_dir" || {
+            log_message "ERROR" "Failed to create socket directory: $socket_dir" "$vm_name"
+            return 1
+        }
+    fi
+    if [[ ! -w "$socket_dir" ]]; then
+        log_message "ERROR" "Socket directory is not writable: $socket_dir" "$vm_name"
+        return 1
+    fi
+
+    # Check permissions
+    log_message "DEBUG" "Running virtiofsd with user: $(whoami), socket: $socket_path, folder: $folder_path" "$vm_name"
+
+    # Set file descriptor limit
+    local target_nofile=1000000
+    local current_nofile
+    current_nofile=$(ulimit -n)
+    local current_nofile_hard
+    current_nofile_hard=$(ulimit -Hn)
+    if [[ "$current_nofile_hard" -lt "$target_nofile" ]]; then
+        log_message "WARNING" "Current hard file descriptor limit ($current_nofile_hard) is less than desired ($target_nofile). Attempting to increase." "$vm_name"
+        ulimit -Hn "$target_nofile" 2>/dev/null || {
+            log_message "WARNING" "Failed to set hard file descriptor limit to $target_nofile. Using $current_nofile_hard." "$vm_name"
+        }
+        ulimit -Sn "$target_nofile" 2>/dev/null || {
+            log_message "WARNING" "Failed to set soft file descriptor limit to $target_nofile. Using $current_nofile." "$vm_name"
+        }
+    else
+        if [[ "$current_nofile" -lt "$target_nofile" ]]; then
+            ulimit -n "$target_nofile" 2>/dev/null || {
+                log_message "WARNING" "Failed to set file descriptor limit to $target_nofile. Using $current_nofile." "$vm_name"
+            }
+        fi
+        log_message "DEBUG" "File descriptor limit set to $(ulimit -n)" "$vm_name"
+    fi
+
+    # Kill any existing virtiofsd and remove stale socket
+    if [[ -f "$socket_path.pid" ]]; then
+        local old_pid
+        old_pid=$(cat "$socket_path.pid")
+        if kill -0 "$old_pid" 2>/dev/null; then
+            log_message "DEBUG" "Stopping existing virtiofsd (PID: $old_pid)" "$vm_name"
+            kill "$old_pid" 2>/dev/null
+            sleep 1
+        fi
+        rm -f "$socket_path.pid"
+    fi
+    if [[ -S "$socket_path" ]]; then
+        log_message "DEBUG" "Removing stale socket: $socket_path" "$vm_name"
+        rm -f "$socket_path"
+    fi
+
+    # Start virtiofsd daemon
+    log_message "DEBUG" "Starting virtiofsd from $virtiofsd_path for folder: $folder_path (tag: $tag)" "$vm_name"
+    "$virtiofsd_path" \
+        --socket-path="$socket_path" \
+        --shared-dir="$folder_path" \
+        --thread-pool-size=4 \
+        --log-level=debug \
+        --announce-submounts \
+        --sandbox none \
+        2> "$VM_DIR/$vm_name/logs/virtiofsd_${tag}.log" &
+
+    local virtiofs_pid=$!
+    echo "$virtiofs_pid" > "$socket_path.pid"
+
+    # Wait for socket to be created (max 10 seconds)
+    local count=0
+    while [[ ! -S "$socket_path" ]] && [[ $count -lt 100 ]]; do
+        sleep 0.1
+        ((count++))
+    done
+
+    if [[ ! -S "$socket_path" ]]; then
+        log_message "ERROR" "virtiofsd failed to create socket: $socket_path" "$vm_name"
+        if [[ -s "$VM_DIR/$vm_name/logs/virtiofsd_${tag}.log" ]]; then
+            log_message "ERROR" "virtiofsd error: $(tail -n 5 "$VM_DIR/$vm_name/logs/virtiofsd_${tag}.log")" "$vm_name"
+        fi
+        kill "$virtiofs_pid" 2>/dev/null
+        rm -f "$socket_path.pid"
+        return 1
+    fi
+
+    log_message "DEBUG" "virtiofsd started successfully (PID: $virtiofs_pid)" "$vm_name"
+    return 0
+}
+
+configure_virtiofs_shared_folders() {
+    local vm_name="$1"
+    local -n cmd_array=$2 # Nameref to QEMU command array
+
+    if [[ "$ENABLE_VIRTIO" != "1" ]]; then
+        log_message "WARNING" "VirtioFS shared folders require VirtIO to be enabled. Skipping shared folder configuration for '$vm_name'." "$vm_name"
+        return
+    fi
+
+    if [[ -n "$SHARED_FOLDERS" ]]; then
+        IFS=',' read -ra folders_spec_list <<< "$SHARED_FOLDERS"
+        local seen_tags=()
+        local virtiofs_count=0
+        
+        for i in "${!folders_spec_list[@]}"; do
+            local current_folder_spec="${folders_spec_list[$i]}"
+            local folder_path mount_tag folder_type
+
+            # Parse the spec: path:tag:type
+            IFS=':' read -r folder_path mount_tag folder_type <<< "$current_folder_spec"
+
+            # Skip if not virtiofs type
+            if [[ "$folder_type" != "virtiofs" ]]; then
+                continue
+            fi
+
+            if [[ -z "$folder_path" ]]; then
+                log_message "WARNING" "Empty folder path in SHARED_FOLDERS spec: '$current_folder_spec'. Skipping." "$vm_name"
+                continue
+            fi
+
+            # Generate unique mount tag if not provided
+            if [[ -z "$mount_tag" ]]; then
+                mount_tag=$(echo -n "$folder_path" | md5sum | cut -c1-8)
+                log_message "DEBUG" "Generated mount_tag '$mount_tag' for folder '$folder_path'" "$vm_name"
+            fi
+
+            # Validate mount tag format
+            if [[ ! "$mount_tag" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+                log_message "ERROR" "Invalid mount tag '$mount_tag' for folder '$folder_path'. Use letters, numbers, hyphens, underscores. Skipping." "$vm_name"
+                continue
+            fi
+
+            # Check for duplicate mount tags
+            local tag_is_duplicate=false
+            for tag in "${seen_tags[@]}"; do
+                if [[ "$tag" == "$mount_tag" ]]; then
+                    log_message "ERROR" "Duplicate mount tag '$mount_tag' for folder '$folder_path'. Skipping." "$vm_name"
+                    tag_is_duplicate=true
+                    break
+                fi
+            done
+            if [[ "$tag_is_duplicate" == true ]]; then
+                continue
+            fi
+            seen_tags+=("$mount_tag")
+
+            if [[ -d "$folder_path" ]]; then
+                # Create socket path
+                local socket_path="$VM_DIR/$vm_name/sockets/virtiofs_${mount_tag}.sock"
+                
+                # Start virtiofsd daemon
+                if start_virtiofs_daemon "$vm_name" "$folder_path" "$socket_path" "$mount_tag"; then
+                    # Configure memory backend only once
+                    if [[ "$virtiofs_count" -eq 0 ]]; then
+                        # Add memory backend configuration for VirtioFS
+                        cmd_array+=("-object" "memory-backend-memfd,id=mem,size=$MEMORY,share=on")
+                        cmd_array+=("-numa" "node,memdev=mem")
+                    fi
+                    
+                    # Add QEMU chardev and vhost-user-fs device
+                    cmd_array+=("-chardev" "socket,id=char_fs_$i,path=$socket_path")
+                    # Remove cache-size parameter as it's not supported in all QEMU versions
+                    cmd_array+=("-device" "vhost-user-fs-pci,queue-size=1024,chardev=char_fs_$i,tag=$mount_tag")
+                    
+                    ((virtiofs_count++))
+                    log_message "DEBUG" "Added VirtioFS shared folder: '$folder_path' (tag: '$mount_tag') for VM '$vm_name'" "$vm_name"
+                else
+                    log_message "ERROR" "Failed to setup VirtioFS for folder: '$folder_path'. Skipping." "$vm_name"
+                fi
+            else
+                log_message "WARNING" "Shared folder path does not exist: '$folder_path'. Skipping for VM '$vm_name'." "$vm_name"
+            fi
+        done
+    fi
+}
+
+
 # Configures shared folder options for Linux guest using VirtIO 9p filesystem
 configure_linux_shared_folders() {
     local vm_name="$1"
@@ -1571,29 +1864,31 @@ configure_linux_shared_folders() {
         local seen_tags=()
         for i in "${!folders_spec_list[@]}"; do
             local current_folder_spec="${folders_spec_list[$i]}"
-            local folder_path mount_tag security_model
+            local folder_path mount_tag folder_type
 
-            # Parse the full spec: path:tag:security_model
-            IFS=':' read -r folder_path mount_tag security_model <<< "$current_folder_spec"
+            # Parse the spec: path:tag:type
+            IFS=':' read -r folder_path mount_tag folder_type <<< "$current_folder_spec"
+
+            # Skip if not 9p type
+            if [[ "$folder_type" != "9p" ]]; then
+                continue
+            fi
 
             if [[ -z "$folder_path" ]]; then
                 log_message "WARNING" "Empty folder path in SHARED_FOLDERS spec: '$current_folder_spec'. Skipping." "$vm_name"
                 continue
             fi
 
-            # Generate unique mount tag if not provided or empty from the spec
+            # Generate unique mount tag if not provided
             if [[ -z "$mount_tag" ]]; then
                 mount_tag=$(echo -n "$folder_path" | md5sum | cut -c1-8)
                 log_message "DEBUG" "Generated mount_tag '$mount_tag' for folder '$folder_path'" "$vm_name"
             fi
 
-            # Set default security model if not provided or empty from the spec
-            security_model=${security_model:-mapped-xattr}
-
             # Validate mount tag format
             if [[ ! "$mount_tag" =~ ^[a-zA-Z0-9_-]+$ ]]; then
                 log_message "ERROR" "Invalid mount tag '$mount_tag' for folder '$folder_path'. Use letters, numbers, hyphens, underscores. Skipping." "$vm_name"
-                continue # Skip this folder
+                continue
             fi
 
             # Check for duplicate mount tags
@@ -1606,14 +1901,14 @@ configure_linux_shared_folders() {
                 fi
             done
             if [[ "$tag_is_duplicate" == true ]]; then
-                continue # Skip this folder
+                continue
             fi
             seen_tags+=("$mount_tag")
 
             if [[ -d "$folder_path" ]]; then
-                cmd_array+=("-fsdev" "local,id=fsdev$i,path=$folder_path,security_model=$security_model")
+                cmd_array+=("-fsdev" "local,id=fsdev$i,path=$folder_path,security_model=mapped-xattr")
                 cmd_array+=("-device" "virtio-9p-pci,fsdev=fsdev$i,mount_tag=$mount_tag")
-                log_message "DEBUG" "Added 9p shared folder: '$folder_path' (tag: '$mount_tag', security: '$security_model') for VM '$vm_name'" "$vm_name"
+                log_message "DEBUG" "Added 9p shared folder: '$folder_path' (tag: '$mount_tag') for VM '$vm_name'" "$vm_name"
             else
                 log_message "WARNING" "Shared folder path does not exist: '$folder_path'. Skipping for VM '$vm_name'." "$vm_name"
             fi
@@ -1627,7 +1922,7 @@ manage_shared_folders() {
     local action="$2"
     local folder_path="${3:-}"
     local mount_tag="${4:-}"
-    local security_model="${5:-}"
+    local folder_type="${5:-}"
 
     validate_vm_name "$vm_name" || return 1
 
@@ -1684,7 +1979,7 @@ manage_shared_folders() {
 
             # Check if already exists - need to extract path from full folder spec
             for f in "${folders[@]}"; do
-                # Extract just the folder path from the full spec (format: path:tag:security_model)
+                # Extract just the folder path from the full spec (format: path:tag:type)
                 IFS=':' read -r existing_path _ <<< "$f"
                 if [[ "$existing_path" == "$folder_path" ]]; then
                     log_message "INFO" "Shared folder already exists: $folder_path" "$vm_name"
@@ -1709,21 +2004,62 @@ manage_shared_folders() {
                 done
             fi
 
-            # Set default mount tag if not provided (using MD5 hash like in configure_linux_shared_folders)
+            # Set default mount tag if not provided (using MD5 hash)
             if [[ -z "$mount_tag" ]]; then
                 mount_tag=$(echo -n "$folder_path" | md5sum | cut -c1-8)
             fi
 
-            # Set default security model if not provided
-            if [[ -z "$security_model" ]]; then
-                security_model="mapped-xattr"
+            # Set default folder type based on OS if not provided
+            if [[ -z "$folder_type" ]]; then
+                if [[ "$OS_TYPE" == "linux" ]]; then
+                    folder_type="virtiofs"  # Default to virtiofs for Linux
+                elif [[ "$OS_TYPE" == "windows" ]]; then
+                    folder_type="smb"  # Windows only supports SMB
+                fi
+            fi
+
+            # Validate folder type
+            if [[ "$OS_TYPE" == "linux" ]]; then
+                if [[ "$folder_type" != "virtiofs" && "$folder_type" != "9p" ]]; then
+                    log_message "ERROR" "Invalid folder type '$folder_type' for Linux VM. Use: virtiofs, 9p" "$vm_name"
+                    return 1
+                fi
+            elif [[ "$OS_TYPE" == "windows" ]]; then
+                if [[ "$folder_type" != "smb" ]]; then
+                    log_message "ERROR" "Windows VMs only support SMB shared folders" "$vm_name"
+                    return 1
+                fi
             fi
 
             # Build the folder spec
-            local folder_spec="$folder_path:$mount_tag:$security_model"
+            local folder_spec="$folder_path:$mount_tag:$folder_type"
             folders+=("$folder_spec")
             changed=true
-            log_message "INFO" "Shared folder added: $folder_path (tag: $mount_tag, security: $security_model)" "$vm_name"
+            
+            # Show mounting instructions based on folder type
+            log_message "INFO" "Shared folder added: $folder_path (tag: $mount_tag, type: $folder_type)" "$vm_name"
+            
+            if [[ "$OS_TYPE" == "linux" ]]; then
+                echo ""
+                echo "To mount this folder in the guest VM:"
+                if [[ "$folder_type" == "virtiofs" ]]; then
+                    echo "  sudo mkdir -p /mnt/$mount_tag"
+                    echo "  sudo mount -t virtiofs $mount_tag /mnt/$mount_tag"
+                    echo ""
+                    echo "For automatic mounting at boot, add to /etc/fstab:"
+                    echo "  $mount_tag /mnt/$mount_tag virtiofs defaults 0 0"
+                else
+                    echo "  sudo mkdir -p /mnt/$mount_tag"
+                    echo "  sudo mount -t 9p -o trans=virtio,version=9p2000.L $mount_tag /mnt/$mount_tag"
+                    echo ""
+                    echo "For automatic mounting at boot, add to /etc/fstab:"
+                    echo "  $mount_tag /mnt/$mount_tag 9p trans=virtio,version=9p2000.L 0 0"
+                fi
+            elif [[ "$OS_TYPE" == "windows" ]]; then
+                echo ""
+                echo "The shared folder will be available as a network drive in Windows."
+                echo "Access it via: \\\\10.0.2.4\\qemu"
+            fi
             ;;
         "remove")
             if [[ -z "$folder_path" ]]; then
@@ -1740,6 +2076,7 @@ manage_shared_folders() {
             local found=false
             local removed_path=""
             local removed_tag=""
+            local removed_type=""
 
             # Check if input looks like a mount tag (no slashes, short name)
             local is_mount_tag=false
@@ -1758,8 +2095,8 @@ manage_shared_folders() {
             fi
 
             for f in "${folders[@]}"; do
-                # Extract components from the full spec (format: path:tag:security_model)
-                IFS=':' read -r existing_path existing_tag existing_security <<< "$f"
+                # Extract components from the full spec (format: path:tag:type)
+                IFS=':' read -r existing_path existing_tag existing_type <<< "$f"
 
                 local match=false
                 if [[ "$is_mount_tag" == true ]]; then
@@ -1768,6 +2105,7 @@ manage_shared_folders() {
                         match=true
                         removed_path="$existing_path"
                         removed_tag="$existing_tag"
+                        removed_type="$existing_type"
                     fi
                 else
                     # Try to match by path
@@ -1775,12 +2113,13 @@ manage_shared_folders() {
                         match=true
                         removed_path="$existing_path"
                         removed_tag="$existing_tag"
+                        removed_type="$existing_type"
                     fi
                 fi
 
                 if [[ "$match" == true ]]; then
                     found=true
-                    log_message "INFO" "Removing shared folder: $existing_path (tag: ${existing_tag:-auto}, security: ${existing_security:-mapped-xattr})" "$vm_name"
+                    log_message "INFO" "Removing shared folder: $existing_path (tag: ${existing_tag:-auto}, type: ${existing_type:-virtiofs})" "$vm_name"
                 else
                     new_folders+=("$f")
                 fi
@@ -1794,8 +2133,8 @@ manage_shared_folders() {
                 fi
                 log_message "INFO" "Available shared folders:" "$vm_name"
                 for f in "${folders[@]}"; do
-                    IFS=':' read -r existing_path existing_tag existing_security <<< "$f"
-                    log_message "INFO" "  - $existing_path (tag: ${existing_tag:-auto})" "$vm_name"
+                    IFS=':' read -r existing_path existing_tag existing_type <<< "$f"
+                    log_message "INFO" "  - $existing_path (tag: ${existing_tag:-auto}, type: ${existing_type:-virtiofs})" "$vm_name"
                 done
                 return 1
             fi
@@ -1803,9 +2142,9 @@ manage_shared_folders() {
             folders=("${new_folders[@]}")
             changed=true
             if [[ "$is_mount_tag" == true ]]; then
-                log_message "INFO" "Shared folder removed by tag '$folder_path': $removed_path (tag: ${removed_tag:-auto})" "$vm_name"
+                log_message "INFO" "Shared folder removed by tag '$folder_path': $removed_path (tag: ${removed_tag:-auto}, type: ${removed_type:-virtiofs})" "$vm_name"
             else
-                log_message "INFO" "Shared folder removed: $removed_path (tag: ${removed_tag:-auto})" "$vm_name"
+                log_message "INFO" "Shared folder removed: $removed_path (tag: ${removed_tag:-auto}, type: ${removed_type:-virtiofs})" "$vm_name"
             fi
             ;;
         "list")
@@ -1816,17 +2155,32 @@ manage_shared_folders() {
                 for i in "${!folders[@]}"; do
                     local folder="${folders[$i]}"
                     # Parse the full folder spec
-                    IFS=':' read -r folder_path mount_tag security_model <<< "$folder"
+                    IFS=':' read -r folder_path mount_tag folder_type <<< "$folder"
                     local status="missing"
                     [[ -d "$folder_path" ]] && status="exists"
                     echo "  share$i: $folder_path ($status)"
-                    if [[ -n "$mount_tag" ]]; then
-                        echo "    tag: $mount_tag"
-                    fi
-                    if [[ -n "$security_model" ]]; then
-                        echo "    security: $security_model"
-                    fi
+                    echo "    tag: ${mount_tag:-auto}"
+                    echo "    type: ${folder_type:-virtiofs}"
                 done
+                
+                # Show mounting instructions
+                if [[ ${#folders[@]} -gt 0 ]] && [[ "$OS_TYPE" == "linux" ]]; then
+                    echo ""
+                    echo "Mount instructions for guest VM:"
+                    local has_virtiofs=false
+                    local has_9p=false
+                    for f in "${folders[@]}"; do
+                        IFS=':' read -r _ _ folder_type <<< "$f"
+                        [[ "$folder_type" == "virtiofs" ]] && has_virtiofs=true
+                        [[ "$folder_type" == "9p" ]] && has_9p=true
+                    done
+                    if [[ "$has_virtiofs" == true ]]; then
+                        echo "  For VirtioFS: sudo mount -t virtiofs <tag> /mnt/<mountpoint>"
+                    fi
+                    if [[ "$has_9p" == true ]]; then
+                        echo "  For 9p: sudo mount -t 9p -o trans=virtio,version=9p2000.L <tag> /mnt/<mountpoint>"
+                    fi
+                fi
             fi
             ;;
         *)
@@ -1843,6 +2197,133 @@ manage_shared_folders() {
             SHARED_FOLDERS=$(
                 IFS=','
                 echo "${folders[*]}"
+            )
+        fi
+        save_vm_config "$vm_name"
+    fi
+}
+
+# ============================================================================
+# USB DEVICE MANAGEMENT
+# ============================================================================
+
+# Manages USB passthrough devices for a VM
+manage_usb_devices() {
+    local vm_name="$1"
+    local action="$2"
+    local device_spec="${3:-}"
+
+    validate_vm_name "$vm_name" || return 1
+
+    if ! vm_exists "$vm_name"; then
+        log_message "ERROR" "VM '$vm_name' does not exist" "$vm_name"
+        return 1
+    fi
+
+    if [[ "$action" != "list" ]] && vm_is_locked "$vm_name"; then
+        log_message "ERROR" "VM '$vm_name' is locked. Unlock it first" "$vm_name"
+        return 1
+    fi
+
+    load_vm_config "$vm_name" || return 1
+
+    # Load existing devices into an array
+    IFS=',' read -ra devices <<< "${USB_DEVICES:-}"
+    local changed=false
+
+    case "$action" in
+        "add")
+            if [[ -z "$device_spec" ]]; then
+                log_message "ERROR" "Device specification required for 'add' action (format: VENDOR_ID:PRODUCT_ID)" "$vm_name"
+                echo "Hint: Use 'lsusb' to find device IDs."
+                return 1
+            fi
+
+            if [[ ! "$device_spec" =~ ^[0-9a-fA-F]{4}:[0-9a-fA-F]{4}$ ]]; then
+                log_message "ERROR" "Invalid device format: '$device_spec'. Use VENDOR_ID:PRODUCT_ID (e.g., 1d6b:0002)" "$vm_name"
+                return 1
+            fi
+
+            if vm_is_running "$vm_name"; then
+                log_message "ERROR" "Cannot modify USB devices while VM is running. Stop '$vm_name' first" "$vm_name"
+                return 1
+            fi
+
+            # Check if device already exists
+            for dev in "${devices[@]}"; do
+                if [[ "$dev" == "$device_spec" ]]; then
+                    log_message "INFO" "USB device '$device_spec' is already configured for passthrough" "$vm_name"
+                    return 0
+                fi
+            done
+
+            devices+=("$device_spec")
+            changed=true
+            log_message "INFO" "USB device '$device_spec' added for passthrough" "$vm_name"
+            log_message "WARNING" "USB passthrough may require root privileges or specific udev rules for the host device" "$vm_name"
+            ;;
+
+        "remove")
+            if [[ -z "$device_spec" ]]; then
+                log_message "ERROR" "Device specification required for 'remove' action (format: VENDOR_ID:PRODUCT_ID)" "$vm_name"
+                return 1
+            fi
+
+            if [[ ! "$device_spec" =~ ^[0-9a-fA-F]{4}:[0-9a-fA-F]{4}$ ]]; then
+                log_message "ERROR" "Invalid device format: '$device_spec'. Use VENDOR_ID:PRODUCT_ID" "$vm_name"
+                return 1
+            fi
+
+            if vm_is_running "$vm_name"; then
+                log_message "ERROR" "Cannot modify USB devices while VM is running. Stop '$vm_name' first" "$vm_name"
+                return 1
+            fi
+
+            local new_devices=()
+            local found=false
+            for dev in "${devices[@]}"; do
+                if [[ "$dev" == "$device_spec" ]]; then
+                    found=true
+                else
+                    new_devices+=("$dev")
+                fi
+            done
+
+            if ! $found; then
+                log_message "ERROR" "USB device not found in configuration: $device_spec" "$vm_name"
+                return 1
+            fi
+
+            devices=("${new_devices[@]}")
+            changed=true
+            log_message "INFO" "USB device '$device_spec' removed from passthrough configuration" "$vm_name"
+            ;;
+
+        "list")
+            echo "Configured USB passthrough devices for VM '$vm_name':"
+            if [[ ${#devices[@]} -eq 0 ]]; then
+                echo "  No USB devices configured for passthrough"
+            else
+                for dev in "${devices[@]}"; do
+                    echo "  - $dev"
+                done
+            fi
+            ;;
+
+        *)
+            log_message "ERROR" "Invalid action: $action. Use: add, remove, list" "$vm_name"
+            return 1
+            ;;
+    esac
+
+    if [[ "$changed" == true ]]; then
+        # Save updated device list
+        if [[ ${#devices[@]} -eq 0 ]]; then
+            USB_DEVICES=""
+        else
+            USB_DEVICES=$(
+                IFS=','
+                echo "${devices[*]}"
             )
         fi
         save_vm_config "$vm_name"
@@ -1881,9 +2362,17 @@ NETWORK COMMANDS
 
 SHARED FOLDER COMMANDS
 ─────────────────────
-  shared add <name> <folder_path> [mount_tag] [security_model]
+  shared add <name> <folder_path> [mount_tag] [type]
   shared remove <name> <folder_path|mount_tag> 
   shared list <name>
+
+  Types: virtiofs (default for Linux), 9p, smb (Windows only)
+
+USB COMMANDS
+──────────
+  usb add <name> <vendor_id:product_id>
+  usb remove <name> <vendor_id:product_id>
+  usb list <name>
 
 SECURITY COMMANDS
 ────────────────
@@ -2223,13 +2712,13 @@ main() {
         "shared")
             shift
             if [[ $# -lt 2 ]]; then
-                log_message "ERROR" "Usage: qemate shared <add|remove|list> <name> [folder_path] [mount_tag] [security_model]"
+                log_message "ERROR" "Usage: qemate shared <add|remove|list> <name> [folder_path] [mount_tag] [type]"
                 exit 1
             fi
             case "$1" in
                 "add")
                     if [[ $# -lt 3 ]]; then
-                        log_message "ERROR" "Usage: qemate shared add <name> <folder_path> [mount_tag] [security_model]"
+                        log_message "ERROR" "Usage: qemate shared add <name> <folder_path> [mount_tag] [type]"
                         exit 1
                     fi
                     manage_shared_folders "$2" "$1" "$3" "${4:-}" "${5:-}"
@@ -2246,6 +2735,33 @@ main() {
                     ;;
                 *)
                     log_message "ERROR" "Invalid shared command: $1. Use: add, remove, list"
+                    exit 1
+                    ;;
+            esac
+            ;;
+        "usb")
+            shift
+            if [[ $# -lt 2 ]]; then
+                log_message "ERROR" "Usage: qemate usb <add|remove|list> <name> [vendor:product]"
+                exit 1
+            fi
+            case "$1" in
+                "add" | "remove")
+                    if [[ $# -ne 3 ]]; then
+                        log_message "ERROR" "Usage: qemate usb $1 <name> <vendor_id:product_id>"
+                        exit 1
+                    fi
+                    manage_usb_devices "$2" "$1" "$3"
+                    ;;
+                "list")
+                    if [[ $# -ne 2 ]]; then
+                        log_message "ERROR" "Usage: qemate usb list <name>"
+                        exit 1
+                    fi
+                    manage_usb_devices "$2" "$1"
+                    ;;
+                *)
+                    log_message "ERROR" "Invalid usb command: $1. Use: add, remove, list"
                     exit 1
                     ;;
             esac
