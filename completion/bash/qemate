@@ -12,13 +12,14 @@ _qemate_completion() {
     local VM_DIR="${QEMATE_VM_DIR:-${HOME}/QVMs}"
 
     # Main commands
-    local commands="vm net shared security help version"
+    local commands="vm net shared usb security help version"
 
     # Subcommands
     local vm_subcommands="create start stop delete resize list status configure"
     local net_subcommands="type model port"
     local net_port_subcommands="add remove"
     local shared_subcommands="add remove list"
+    local usb_subcommands="add remove list"
     local security_subcommands="lock unlock"
 
     # Options for various commands
@@ -28,16 +29,13 @@ _qemate_completion() {
     local vm_delete_opts="--force"
     local vm_resize_opts="--force"
     local vm_configure_opts="cores memory audio"
-    local net_port_add_opts=""
-    local shared_add_opts=""
 
     # Values for specific options
     local vm_create_os_type_values="linux windows"
-    local vm_create_machine_values="q35,accel=kvm pc,accel=tcg"
+    local vm_create_machine_values="q35,accel=kvm pc,accel=tcg q35,accel=tcg pc,accel=kvm"
     local net_type_values="user nat none"
     local net_model_values="virtio-net-pci e1000 rtl8139"
-    local net_proto_values="tcp udp"
-    local shared_security_model_values="mapped-xattr passthrough"
+    local shared_type_values="virtiofs 9p smb"
 
     # Helper function to get VM names
     _get_vm_names() {
@@ -57,6 +55,19 @@ _qemate_completion() {
                 echo "$shared_folders" | while IFS=':' read -r _ tag _; do
                     [[ -n "$tag" ]] && echo "$tag"
                 done
+            fi
+        fi
+    }
+
+    # Helper function to get USB devices for a VM
+    _get_usb_devices() {
+        local vm_name="$1"
+        local config_file="$VM_DIR/$vm_name/config"
+        if [[ -f "$config_file" ]]; then
+            local usb_devices
+            usb_devices=$(grep '^USB_DEVICES=' "$config_file" | cut -d'=' -f2- | tr -d '"' | tr ',' '\n')
+            if [[ -n "$usb_devices" ]]; then
+                echo "$usb_devices"
             fi
         fi
     }
@@ -103,11 +114,20 @@ _qemate_completion() {
                             fi
                         fi
                         ;;
-                    stop | delete)
+                    stop)
                         if [[ "$cword" -eq 3 ]]; then
                             COMPREPLY=($(compgen -W "$(_get_vm_names)" -- "$cur"))
-                        elif [[ "$cword" -eq 4 && -n "${words[3]}" && "$(_get_vm_names | grep -x "${words[3]}")" ]]; then
-                            COMPREPLY=($(compgen -W "${vm_cmd== "stop" && "$vm_stop_opts" || "$vm_delete_opts"}" -- "$cur"))
+                        elif [[ "$cword" -eq 4 ]]; then
+                            COMPREPLY=($(compgen -W "$vm_stop_opts" -- "$cur"))
+                        else
+                            COMPREPLY=()
+                        fi
+                        ;;
+                    delete)
+                        if [[ "$cword" -eq 3 ]]; then
+                            COMPREPLY=($(compgen -W "$(_get_vm_names)" -- "$cur"))
+                        elif [[ "$cword" -eq 4 ]]; then
+                            COMPREPLY=($(compgen -W "$vm_delete_opts" -- "$cur"))
                         else
                             COMPREPLY=()
                         fi
@@ -115,10 +135,16 @@ _qemate_completion() {
                     resize)
                         if [[ "$cword" -eq 3 ]]; then
                             COMPREPLY=($(compgen -W "$(_get_vm_names)" -- "$cur"))
-                        elif [[ "$cword" -eq 4 && -n "${words[3]}" && "$(_get_vm_names | grep -x "${words[3]}")" ]]; then
+                        elif [[ "$cword" -eq 4 ]]; then
+                            # Could be size or --force
                             COMPREPLY=($(compgen -W "$vm_resize_opts" -- "$cur"))
-                        elif [[ "$cword" -eq 4 || "$cword" -eq 5 ]]; then
-                            COMPREPLY=()
+                        elif [[ "$cword" -eq 5 ]]; then
+                            # If prev was a VM name and word[4] wasn't --force, this should be --force
+                            if [[ "${words[4]}" != "--force" ]]; then
+                                COMPREPLY=($(compgen -W "$vm_resize_opts" -- "$cur"))
+                            else
+                                COMPREPLY=()
+                            fi
                         else
                             COMPREPLY=()
                         fi
@@ -129,7 +155,7 @@ _qemate_completion() {
                         elif [[ "$vm_cmd" == "configure" && "$cword" -eq 4 ]]; then
                             COMPREPLY=($(compgen -W "$vm_configure_opts" -- "$cur"))
                         elif [[ "$vm_cmd" == "configure" && "$cword" -eq 5 ]]; then
-                            if [[ "$prev" == "audio" ]]; then
+                            if [[ "${words[4]}" == "audio" ]]; then
                                 COMPREPLY=($(compgen -W "on off enable disable 1 0 true false" -- "$cur"))
                             else
                                 COMPREPLY=()
@@ -178,6 +204,7 @@ _qemate_completion() {
                                     if [[ "$cword" -eq 4 ]]; then
                                         COMPREPLY=($(compgen -W "$(_get_vm_names)" -- "$cur"))
                                     elif [[ "$cword" -eq 5 ]]; then
+                                        # Port specification format: host:guest[:tcp|udp]
                                         COMPREPLY=()
                                     else
                                         COMPREPLY=()
@@ -206,11 +233,14 @@ _qemate_completion() {
                         if [[ "$cword" -eq 3 ]]; then
                             COMPREPLY=($(compgen -W "$(_get_vm_names)" -- "$cur"))
                         elif [[ "$cword" -eq 4 ]]; then
+                            # Folder path - complete directories
                             COMPREPLY=($(compgen -d -- "$cur"))
                         elif [[ "$cword" -eq 5 ]]; then
+                            # Mount tag - user input, no completion
                             COMPREPLY=()
                         elif [[ "$cword" -eq 6 ]]; then
-                            COMPREPLY=($(compgen -W "$shared_security_model_values" -- "$cur"))
+                            # Folder type: virtiofs, 9p, smb
+                            COMPREPLY=($(compgen -W "$shared_type_values" -- "$cur"))
                         else
                             COMPREPLY=()
                         fi
@@ -221,8 +251,53 @@ _qemate_completion() {
                         elif [[ "$cword" -eq 4 ]]; then
                             # Offer directories or mount tags
                             local vm_name="${words[3]}"
+                            local tags=($(_get_mount_tags "$vm_name"))
                             COMPREPLY=($(compgen -d -- "$cur"))
-                            COMPREPLY+=($(_get_mount_tags "$vm_name"))
+                            COMPREPLY+=($(compgen -W "${tags[*]}" -- "$cur"))
+                        else
+                            COMPREPLY=()
+                        fi
+                        ;;
+                esac
+            fi
+            ;;
+        usb)
+            if [[ "$cword" -eq 2 ]]; then
+                COMPREPLY=($(compgen -W "$usb_subcommands" -- "$cur"))
+            else
+                local usb_cmd="${words[2]}"
+                case "$usb_cmd" in
+                    list)
+                        if [[ "$cword" -eq 3 ]]; then
+                            COMPREPLY=($(compgen -W "$(_get_vm_names)" -- "$cur"))
+                        else
+                            COMPREPLY=()
+                        fi
+                        ;;
+                    add)
+                        if [[ "$cword" -eq 3 ]]; then
+                            COMPREPLY=($(compgen -W "$(_get_vm_names)" -- "$cur"))
+                        elif [[ "$cword" -eq 4 ]]; then
+                            # USB device ID format: vendor:product
+                            # Optionally parse lsusb output if available
+                            if command -v lsusb &> /dev/null; then
+                                local usb_ids=($(lsusb | awk '{print $6}' | sort -u))
+                                COMPREPLY=($(compgen -W "${usb_ids[*]}" -- "$cur"))
+                            else
+                                COMPREPLY=()
+                            fi
+                        else
+                            COMPREPLY=()
+                        fi
+                        ;;
+                    remove)
+                        if [[ "$cword" -eq 3 ]]; then
+                            COMPREPLY=($(compgen -W "$(_get_vm_names)" -- "$cur"))
+                        elif [[ "$cword" -eq 4 ]]; then
+                            # Offer existing USB devices for this VM
+                            local vm_name="${words[3]}"
+                            local devices=($(_get_usb_devices "$vm_name"))
+                            COMPREPLY=($(compgen -W "${devices[*]}" -- "$cur"))
                         else
                             COMPREPLY=()
                         fi
