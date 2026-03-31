@@ -5,7 +5,6 @@ BINDIR ?= $(PREFIX)/bin
 LIBDIR ?= $(PREFIX)/share/qemate
 DOCDIR ?= $(PREFIX)/share/doc/qemate
 MANDIR ?= $(PREFIX)/share/man/man1
-COMPLETIONDIR ?= $(PREFIX)/share/bash-completion/completions
 
 # No build step needed for Bash scripts
 all:
@@ -16,7 +15,6 @@ install:
 	@install -d $(DESTDIR)$(BINDIR)
 	@install -d $(DESTDIR)$(DOCDIR)
 	@install -d $(DESTDIR)$(MANDIR)
-	@install -d $(DESTDIR)$(COMPLETIONDIR)
 	
 	# Install the script
 	@install -m 755 src/qemate.sh $(DESTDIR)$(BINDIR)/qemate
@@ -27,16 +25,12 @@ install:
 	@install -m 644 LICENSE $(DESTDIR)$(DOCDIR)/
 	@install -m 644 docs/man/qemate.1 $(DESTDIR)$(MANDIR)/
 	
-	# Install bash completion
-	@install -m 644 completion/bash/qemate $(DESTDIR)$(COMPLETIONDIR)/
-	
 	@echo "Installation complete!"
 
 uninstall:
 	@echo "Uninstalling Qemate..."
 	@rm -f $(DESTDIR)$(BINDIR)/qemate
 	@rm -f $(DESTDIR)$(MANDIR)/qemate.1
-	@rm -f $(DESTDIR)$(COMPLETIONDIR)/qemate
 	@rm -rf $(DESTDIR)$(DOCDIR)
 	@echo "Uninstall complete!"
 

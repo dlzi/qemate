@@ -8,16 +8,14 @@ PREFIX="${PREFIX:-/usr/local}"
 BINDIR="${BINDIR:-$PREFIX/bin}"
 DOCDIR="${DOCDIR:-$PREFIX/share/doc/qemate}"
 MANDIR="${MANDIR:-$PREFIX/share/man/man1}"
-COMPLETIONDIR="${COMPLETIONDIR:-$PREFIX/share/bash-completion/completions}"
 
 # Check if Qemate is installed
-if [ ! -f "$BINDIR/qemate" ] && [ ! -d "$DOCDIR" ] && [ ! -f "$MANDIR/qemate.1" ] && [ ! -f "$COMPLETIONDIR/qemate" ]; then
+if [ ! -f "$BINDIR/qemate" ] && [ ! -d "$DOCDIR" ] && [ ! -f "$MANDIR/qemate.1" ]; then
     echo "Qemate does not appear to be installed in the specified paths."
     echo "Checked paths:"
     echo "  Binary:      $BINDIR"
     echo "  Docs:        $DOCDIR"
     echo "  Man Page:    $MANDIR"
-    echo "  Completion:  $COMPLETIONDIR"
     exit 1
 fi
 
@@ -27,7 +25,6 @@ echo "Removing from:"
 echo "  Binary:      $BINDIR"
 echo "  Docs:        $DOCDIR"
 echo "  Man Page:    $MANDIR"
-echo "  Completion:  $COMPLETIONDIR"
 echo ""
 
 # Remove the script
@@ -41,10 +38,6 @@ echo "Removing documentation..."
 # Remove man page
 echo "Removing man page..."
 [ -f "$MANDIR/qemate.1" ] && rm -f "$MANDIR/qemate.1" || echo "Man page not found at $MANDIR/qemate.1, skipping."
-
-# Remove bash completion
-echo "Removing bash completion..."
-[ -f "$COMPLETIONDIR/qemate" ] && rm -f "$COMPLETIONDIR/qemate" || echo "Bash completion not found at $COMPLETIONDIR/qemate, skipping."
 
 echo ""
 echo "Uninstallation complete!"

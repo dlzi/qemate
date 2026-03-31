@@ -1,6 +1,6 @@
-.TH QEMATE 1 "October 3, 2025" "Qemate 3.0.2" "User Commands"
+.TH QEMATE 1 "March 30, 2026" "Qemate 4.1.0" "User Commands"
 .SH NAME
-qemate \- Manage QEMU virtual machines from the command line
+qemate \- Hardened QEMU virtual machine manager for Linux
 .SH SYNOPSIS
 .B qemate
 .I COMMAND
@@ -13,353 +13,179 @@ qemate \- Manage QEMU virtual machines from the command line
 .B Qemate
 is a streamlined command-line utility for managing QEMU virtual machines (VMs). It simplifies VM creation, control, and configuration, leveraging QEMU with KVM acceleration for enhanced performance when supported by the host system.
 
-Qemate requires QEMU (specifically
-.B qemu-system-x86_64
-and
-.B qemu-img
-commands, version 9.0 or higher) and Bash (version 5.0 or higher) to be installed. Optional dependencies include virtiofsd for VirtioFS shared folders, PipeWire (preferred), PulseAudio, or ALSA for audio support, and Samba for Windows folder sharing. Logging verbosity is controlled by the
-.B LOG_LEVEL
-environment variable (DEBUG, INFO, WARNING, ERROR; default: INFO).
+Version 4.1.0 introduces a significant **Security Hardening Layer**:
+.IP \(bu 3
+**Hardened Config Lexer**: Replaces standard shell sourcing with a strict regex-based parser and key whitelisting. This prevents arbitrary code execution via modified configuration files.
+.IP \(bu 3
+**Ownership Enforcement**: Automatically verifies that VM configurations are owned by the current user and enforces strict \fB600\fR file permissions.
+.IP \(bu 3
+**Pre-flight Validation**: Performs centralized dependency checks for \fBswtpm\fR, \fBvirtiofsd\fR, and \fBsmbd\fR before VM initialization to prevent partial starts and orphaned processes.
+
 .SH COMMANDS
 .TP
 .B vm
 Manage virtual machines.
 .RS
 .TP
-.B create NAME [--os-type TYPE] [--memory SIZE] [--cores N] [--disk-size SIZE] [--machine TYPE] [--enable-audio]
-Create a new VM with the specified name.
-
-Options:
+.B create NAME [OPTIONS]
+Create a new VM with optimized defaults for Linux or Windows.
 .RS
-.TP
-.B --memory SIZE
-Memory size (e.g., 4G, 2048M; default: 2G for Linux, 4G for Windows).
-.TP
-.B --cores N
-Number of CPU cores (1-64; default: 2 for both Linux and Windows).
-.TP
-.B --disk-size SIZE
-Disk size (e.g., 20G; default: 40G for Linux, 60G for Windows).
-.TP
-.B --machine TYPE
-Machine type (e.g., q35,accel=kvm or pc,accel=tcg; default: q35,accel=kvm).
 .TP
 .B --os-type TYPE
-Operating system type (linux, windows; default: linux). Influences defaults like VirtIO and disk interface.
+OS preset (\fBlinux\fR|\fBwindows\fR; default: linux).
 .TP
-.B --enable-audio
-Enable audio for the VM (requires PipeWire, PulseAudio, or ALSA).
+.B --memory SIZE
+Memory size (e.g., 4G, 2048M).
+.TP
+.B --cores N
+Number of CPU cores (1-64).
+.TP
+.B --disk-size SIZE
+Virtual disk size (e.g., 60G).
+.TP
+.B --machine TYPE
+Machine type (e.g., q35,accel=kvm).
+.TP
+.B --enable-tpm / --no-tpm
+Enable TPM 2.0 emulation (requires \fBswtpm\fR).
+.TP
+.B --spice / --no-spice
+Enable SPICE display server.
+.TP
+.B --share-backend BACKEND
+Select sharing method (\fBauto\fR|\fBvirtfs\fR|\fBsmb\fR|\fBvirtiofs\fR).
 .RE
 .TP
-.B start NAME [--iso PATH] [--headless]
-Start the VM with the given name.
-
-Options:
+.B start NAME [OPTIONS]
+Start a VM.
 .RS
 .TP
-.B --iso PATH
-Path to an ISO file to boot from (e.g., for installation or recovery).
-.TP
 .B --headless
-Run without a graphical console (uses -display none).
+Start without a graphical console.
+.TP
+.B --iso PATH
+Attach a primary ISO for installation.
+.TP
+.B --virtio-iso PATH
+Attach a secondary ISO (e.g., VirtIO-Win drivers).
 .RE
 .TP
 .B stop NAME [--force]
-Stop the VM. Use --force to terminate immediately (SIGKILL) if graceful shutdown (SIGTERM) fails.
-.TP
-.B status NAME
-Display detailed status of the VM (e.g., state, memory, disk usage, network configuration, USB devices, shared folders).
+Stop a VM. \fB--force\fR performs an immediate shutdown.
 .TP
 .B delete NAME [--force]
-Delete the VM and its associated files. Use --force to skip confirmation.
-.TP
-.B list
-List all VMs with their name, status, and lock state.
+Delete a VM and its disk image. \fB--force\fR skips confirmation.
 .TP
 .B resize NAME SIZE [--force]
-Resize the VM's disk to the specified size (e.g., 50G). Shrinking is not supported. Use --force to bypass safety checks (e.g., VM running or locked).
+Resize the VM disk. Includes validation to prevent accidental shrinking.
 .TP
-.B configure NAME [SETTING VALUE]
-Configure VM settings or open the configuration file in the default editor ($EDITOR, defaults to nano if unset). Supported settings:
-.RS
+.B list
+List all VMs, their current status, and lock state.
 .TP
-.B cores
-Set number of CPU cores (1-64).
+.B status NAME
+Display detailed VM configuration and runtime metrics.
 .TP
-.B memory
-Set memory size (e.g., 4G, 2048M).
-.TP
-.B audio
-Enable/disable audio (on/off, enable/disable, 1/0, true/false).
+.B configure NAME SETTING VALUE
+Modify VM settings.
+Supported: \fBcores\fR, \fBmemory\fR, \fBaudio\fR (on|off), \fBtpm\fR (on|off), \fBspice\fR (on|off), \fBspice-port\fR, \fBvideo\fR (virtio-vga|virtio-gpu|qxl|std), \fBshare-backend\fR.
 .RE
-.RE
+
 .TP
-.B net
-Manage network configuration.
-.RS
-.TP
-.B type NAME [nat|user|none]
-Set or display the network type for the VM (default: user).
-.TP
-.B model NAME [e1000|virtio-net-pci|rtl8139]
-Set or display the network device model (default: virtio-net-pci for Linux, e1000 for Windows).
-.TP
-.B port add NAME HOST_PORT:GUEST_PORT[:tcp|udp]
-Add a port forward (e.g., 8080:80 or 8080:80:tcp or 8080:80:udp). Protocol defaults to tcp if not specified.
-.TP
-.B port remove NAME HOST_PORT:GUEST_PORT[:tcp|udp]
-Remove a port forward (e.g., 8080:80 or 8080:80:tcp). Protocol defaults to tcp if not specified.
-.RE
-.TP
-.B shared
+.B share
 Manage shared folders.
 .RS
 .TP
+.B add NAME [TAG:]PATH
+Add a shared directory. Tag is auto-derived if omitted.
+.TP
+.B remove NAME TAG
+Remove a shared directory by its tag.
+.TP
 .B list NAME
-List configured shared folders for the VM with mounting instructions.
-.TP
-.B add NAME HOST_PATH [MOUNT_TAG [TYPE]]
-Add a host folder to share with the VM. MOUNT_TAG is optional (defaults to an MD5-based tag). TYPE can be:
-.RS
-.TP
-.B virtiofs
-VirtioFS (default for Linux, requires virtiofsd daemon, best performance)
-.TP
-.B 9p
-9P filesystem (Linux alternative, no additional daemon required)
-.TP
-.B smb
-SMB/Samba (Windows only, requires Samba on host)
+List all configured shares for the VM.
 .RE
-.TP
-.B remove NAME HOST_PATH_OR_MOUNT_TAG
-Remove the shared folder from the VM by its path or mount tag.
-.RE
+
 .TP
 .B usb
-Manage USB device passthrough.
+Manage USB passthrough.
 .RS
 .TP
-.B list NAME
-List configured USB passthrough devices for the VM.
+.B add NAME VENDOR:PRODUCT
+Attach a host USB device.
 .TP
-.B add NAME VENDOR_ID:PRODUCT_ID
-Add a USB device for passthrough using vendor and product IDs (e.g., 046d:c52b). Use
-.B lsusb
-to find device IDs. May require udev rules or running as root.
-.TP
-.B remove NAME VENDOR_ID:PRODUCT_ID
-Remove a USB device from passthrough configuration.
+.B remove NAME VENDOR:PRODUCT
+Detach a host USB device.
 .RE
+
+.TP
+.B net
+Manage networking and port forwarding.
+.RS
+.TP
+.B type NAME TYPE
+Set network type (\fBuser\fR|\fBnat\fR|\fBnone\fR).
+.TP
+.B model NAME MODEL
+Set network model (\fBvirtio-net-pci\fR|\fBe1000\fR).
+.TP
+.B port add NAME HOST:GUEST[:PROTO]
+Forward host port to guest. PROTO defaults to \fBtcp\fR.
+.RE
+
 .TP
 .B security
-Manage VM security settings.
+Manage VM protection.
 .RS
 .TP
 .B lock NAME
-Lock the VM to prevent modifications or deletion.
+Prevent modification or deletion of the VM.
 .TP
 .B unlock NAME
-Unlock the VM, allowing modifications or deletion.
+Allow modification or deletion.
 .RE
+
+.SH SECURITY & CONCURRENCY
+Qemate implements strict \fBflock\fR-based locking on configuration files to prevent race conditions during simultaneous CLI commands. The script operates with a \fBumask 0077\fR to ensure all created files are accessible only by the owner.
+
+.SH ENVIRONMENT
 .TP
-.B help
-Display the main help message.
+.B QEMATE_VM_DIR
+Overrides the default VM storage directory (\fB~/QVMs\fR).
 .TP
-.B version
-Display the program version (3.0.1).
-.SH EXAMPLES
-Create a Linux VM with 4GB memory and 4 cores:
-.EX
-qemate vm create myvm --os-type linux --memory 4G --cores 4
-.EE
-Start a VM with an ISO in headless mode:
-.EX
-qemate vm start myvm --iso /path/to/install.iso --headless
-.EE
-Resize a VM's disk to 50G:
-.EX
-qemate vm resize myvm 50G
-.EE
-Configure VM CPU cores:
-.EX
-qemate vm configure myvm cores 4
-.EE
-Enable audio for a VM:
-.EX
-qemate vm configure myvm audio on
-.EE
-Add a TCP port forward from host 8080 to guest 80:
-.EX
-qemate net port add myvm 8080:80:tcp
-.EE
-Add a UDP port forward from host 53 to guest 53:
-.EX
-qemate net port add myvm 53:53:udp
-.EE
-Set network type to NAT:
-.EX
-qemate net type myvm nat
-.EE
-Add a VirtioFS shared folder (Linux, recommended):
-.EX
-qemate shared add myvm ~/Documents mydocs virtiofs
-.EE
-Add a 9p shared folder (Linux, alternative):
-.EX
-qemate shared add myvm ~/Downloads downloads 9p
-.EE
-Add an SMB shared folder (Windows):
-.EX
-qemate shared add myvm ~/Shared winshare smb
-.EE
-Remove a shared folder by path:
-.EX
-qemate shared remove myvm ~/Documents
-.EE
-Remove a shared folder by mount tag:
-.EX
-qemate shared remove myvm mydocs
-.EE
-Add a USB device for passthrough:
-.EX
-qemate usb add myvm 046d:c52b
-.EE
-Remove a USB device from passthrough:
-.EX
-qemate usb remove myvm 046d:c52b
-.EE
-List USB devices for a VM:
-.EX
-qemate usb list myvm
-.EE
-List all VMs:
-.EX
-qemate vm list
-.EE
-Show version:
-.EX
-qemate version
-.EE
-Lock a VM:
-.EX
-qemate security lock myvm
-.EE
+.B LOG_LEVEL
+Sets logging verbosity (\fBDEBUG\fR, \fBINFO\fR, \fBWARNING\fR, \fBERROR\fR; default: INFO).
+
 .SH FILES
 .TP
 .I ~/QVMs/VM_NAME/config
-Configuration file for each VM. (Path customizable via $QEMATE_VM_DIR)
+Hardened configuration file.
 .TP
 .I ~/QVMs/VM_NAME/disk.qcow2
-Disk image for each VM (qcow2 format).
+Primary QCOW2 disk image.
 .TP
 .I ~/QVMs/VM_NAME/logs/qemate_vm.log
-Per-VM log file. Verbosity controlled by the LOG_LEVEL environment variable.
+General execution logs.
 .TP
 .I ~/QVMs/VM_NAME/logs/error.log
-Error log file for QEMU errors.
-.TP
-.I ~/QVMs/VM_NAME/logs/virtiofsd_TAG.log
-Log file for VirtioFS daemon (one per shared folder).
-.TP
-.I ~/QVMs/VM_NAME/qemu.pid
-PID file for running VMs.
-.TP
-.I ~/QVMs/VM_NAME/sockets/
-Directory containing Unix sockets for VirtioFS daemons and PID files.
-.SH ENVIRONMENT
-.TP
-.B LOG_LEVEL
-Controls logging verbosity: DEBUG, INFO (default), WARNING, or ERROR.
-.TP
-.B EDITOR
-Editor to use when running
-.B qemate vm configure
-without arguments. Defaults to nano, then vi.
-.TP
-.B QEMATE_VM_DIR
-Custom VM directory location. Defaults to ~/QVMs.
-.SH SHARED FOLDERS
-.SS Linux Guests - VirtioFS (Recommended)
-VirtioFS provides the best performance and full POSIX semantics. Requires virtiofsd daemon on host:
-.PP
-Mount in guest:
+Direct stderr output from the QEMU process.
+
+.SH EXAMPLES
+Create and start a Windows 11 VM with TPM and VirtIO drivers:
 .EX
-sudo mkdir -p /mnt/MOUNT_TAG
-sudo mount -t virtiofs MOUNT_TAG /mnt/MOUNT_TAG
+qemate vm create win11 --os-type windows --enable-tpm
+qemate vm start win11 --iso win11.iso --virtio-iso virtio-win.iso
 .EE
-.PP
-For automatic mounting, add to /etc/fstab:
+
+Add a high-performance shared folder:
 .EX
-MOUNT_TAG /mnt/MOUNT_TAG virtiofs defaults 0 0
+qemate vm configure myvm share-backend virtiofs
+qemate share add myvm /home/user/work
 .EE
-.SS Linux Guests - 9P (Alternative)
-9P filesystem is an alternative that doesn't require virtiofsd:
-.PP
-Mount in guest:
+
+Forward a web port:
 .EX
-sudo mkdir -p /mnt/MOUNT_TAG
-sudo mount -t 9p -o trans=virtio,version=9p2000.L MOUNT_TAG /mnt/MOUNT_TAG
+qemate net port add myvm 8080:80:tcp
 .EE
-.PP
-For automatic mounting, add to /etc/fstab:
-.EX
-MOUNT_TAG /mnt/MOUNT_TAG 9p trans=virtio,version=9p2000.L 0 0
-.EE
-.SS Windows Guests - SMB
-Windows guests use SMB/Samba for folder sharing. Access via File Explorer:
-.EX
-\\\\10.0.2.4\\qemu
-.EE
-.PP
-If access fails, enable "Insecure guest logons" in Windows or adjust firewall settings. See README for detailed troubleshooting steps.
-.SH USB PASSTHROUGH
-USB passthrough allows direct access to host USB devices from the guest. Requires proper permissions:
-.PP
-1. Find device ID:
-.EX
-lsusb
-.EE
-.PP
-2. Add device to VM:
-.EX
-qemate usb add myvm VENDOR:PRODUCT
-.EE
-.PP
-3. If permission denied, create udev rule in /etc/udev/rules.d/99-qemu-usb.rules:
-.EX
-SUBSYSTEM=="usb", ATTR{idVendor}=="VENDOR", ATTR{idProduct}=="PRODUCT", MODE="0666"
-.EE
-.PP
-4. Reload udev:
-.EX
-sudo udevadm control --reload-rules
-sudo udevadm trigger
-.EE
-.PP
-5. Alternative quick solution - Run qemate with sudo (preserves environment):
-.EX
-sudo -E qemate vm start myvm
-.EE
-.PP
-The
-.B -E
-flag preserves your environment variables (including $HOME) so the VM is still managed in your user directory.
-.SH EXIT STATUS
-.TP
-0
-Success
-.TP
-1
-Failure
-.SH BUGS
-Report bugs to: https://github.com/dlzi/qemate/issues
+
 .SH AUTHOR
-Daniel Zilli
-.SH LICENSE
-MIT License
-.SH SEE ALSO
-.BR qemu-system-x86_64 (1),
-.BR qemu-img (1),
-.BR virtiofsd (1),
-.BR lsusb (8)
+Developed by Daniel Zilli.
