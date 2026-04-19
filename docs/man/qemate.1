@@ -46,6 +46,9 @@ Virtual disk size (e.g., 60G).
 .B --machine TYPE
 Machine type (e.g., q35,accel=kvm).
 .TP
+.B --enable-audio / --no-audio
+Enable or disable audio passthrough.
+.TP
 .B --enable-tpm / --no-tpm
 Enable TPM 2.0 emulation (requires \fBswtpm\fR).
 .TP
@@ -68,6 +71,9 @@ Attach a primary ISO for installation.
 .TP
 .B --virtio-iso PATH
 Attach a secondary ISO (e.g., VirtIO-Win drivers).
+.TP
+.B --debug
+Print the full generated QEMU command to stderr before launching.
 .RE
 .TP
 .B stop NAME [--force]
@@ -77,7 +83,7 @@ Stop a VM. \fB--force\fR performs an immediate shutdown.
 Delete a VM and its disk image. \fB--force\fR skips confirmation.
 .TP
 .B resize NAME SIZE [--force]
-Resize the VM disk. Includes validation to prevent accidental shrinking.
+Resize the VM disk (e.g., \fB80G\fR or \fB+20G\fR). Includes validation to prevent accidental shrinking. VM must be stopped unless \fB--force\fR is used.
 .TP
 .B list
 List all VMs, their current status, and lock state.
@@ -86,8 +92,51 @@ List all VMs, their current status, and lock state.
 Display detailed VM configuration and runtime metrics.
 .TP
 .B configure NAME SETTING VALUE
-Modify VM settings.
-Supported: \fBcores\fR, \fBmemory\fR, \fBaudio\fR (on|off), \fBtpm\fR (on|off), \fBspice\fR (on|off), \fBspice-port\fR, \fBvideo\fR (virtio-vga|virtio-gpu|qxl|std), \fBshare-backend\fR.
+Modify VM settings. Supported settings:
+.RS
+.TP
+.B cores
+Integer 1\(en64.
+.TP
+.B memory
+e.g. \fB4G\fR, \fB2048M\fR.
+.TP
+.B audio
+\fBon\fR|\fBoff\fR
+.TP
+.B audio-latency
+Output latency in microseconds, e.g. \fB100000\fR.
+.TP
+.B tpm
+\fBon\fR|\fBoff\fR (requires \fBswtpm\fR).
+.TP
+.B spice
+\fBon\fR|\fBoff\fR
+.TP
+.B spice-port
+Port number 1024\(en65535 (default: 5930).
+.TP
+.B video
+\fBvirtio-vga\fR|\fBvirtio-gpu\fR|\fBqxl-vga\fR|\fBqxl\fR|\fBstd\fR|\fBvmware\fR
+.TP
+.B vram
+VRAM size in MiB, 16\(en512.
+.TP
+.B network-type
+\fBuser\fR|\fBpasst\fR|\fBtap\fR|\fBnone\fR
+.TP
+.B network-model
+\fBvirtio-net-pci\fR|\fBe1000\fR|\fBrtl8139\fR
+.TP
+.B bridge
+Host bridge interface name, e.g. \fBbr0\fR (tap mode only).
+.TP
+.B share-backend
+\fBauto\fR|\fBvirtfs\fR|\fBsmb\fR|\fBvirtiofs\fR
+.TP
+.B --raw
+Open the config file directly in \fB$EDITOR\fR (use with caution).
+.RE
 .RE
 
 .TP
@@ -115,21 +164,23 @@ Attach a host USB device.
 .TP
 .B remove NAME VENDOR:PRODUCT
 Detach a host USB device.
+.TP
+.B list NAME
+List configured USB devices for the VM.
 .RE
 
 .TP
 .B net
-Manage networking and port forwarding.
+Manage port forwarding rules.
 .RS
 .TP
-.B type NAME TYPE
-Set network type (\fBuser\fR|\fBnat\fR|\fBnone\fR).
+.B port add NAME [IP:]HOST:GUEST[:PROTO]
+Forward a host port to a guest port. PROTO defaults to \fBtcp\fR.
 .TP
-.B model NAME MODEL
-Set network model (\fBvirtio-net-pci\fR|\fBe1000\fR).
-.TP
-.B port add NAME HOST:GUEST[:PROTO]
-Forward host port to guest. PROTO defaults to \fBtcp\fR.
+.B port remove NAME [IP:]HOST:GUEST[:PROTO]
+Remove a port forwarding rule.
+.PP
+Network type, model, and bridge interface are configured via \fBvm configure\fR.
 .RE
 
 .TP
@@ -143,6 +194,20 @@ Prevent modification or deletion of the VM.
 .B unlock NAME
 Allow modification or deletion.
 .RE
+
+.SH NETWORK BACKENDS
+.TP
+.B user
+SLiRP userspace NAT. Default; no host setup required.
+.TP
+.B passt
+Unprivileged backend using the host network stack directly. Recommended upgrade from user.
+.TP
+.B tap
+Kernel-accelerated TAP interface. Requires a pre-configured host bridge. Fastest option.
+.TP
+.B none
+No network interface attached to the VM.
 
 .SH SECURITY & CONCURRENCY
 Qemate implements strict \fBflock\fR-based locking on configuration files to prevent race conditions during simultaneous CLI commands. The script operates with a \fBumask 0077\fR to ensure all created files are accessible only by the owner.
@@ -182,9 +247,19 @@ qemate vm configure myvm share-backend virtiofs
 qemate share add myvm /home/user/work
 .EE
 
+Switch to passt networking:
+.EX
+qemate vm configure myvm network-type passt
+.EE
+
 Forward a web port:
 .EX
 qemate net port add myvm 8080:80:tcp
+.EE
+
+Tune audio latency:
+.EX
+qemate vm configure myvm audio-latency 100000
 .EE
 
 .SH AUTHOR

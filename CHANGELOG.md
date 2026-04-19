@@ -2,8 +2,58 @@
 
 All notable changes to Qemate will be documented in this file.
 
+## [4.2.1] - 2026-04-18
+### Changed
+- **Bash-native Parsing**: Replaced `awk` with pure-Bash logic for memory validation (`/proc/meminfo`) and disk size extraction (`qemu-img info --output=json`), eliminating external dependencies.
+- **OVMF Firmware Discovery**: `find_ovmf` now also searches for the `.4m.fd` firmware variant used by Arch Linux's `edk2-ovmf` package.
+
+### Added
+- **QEMU Guest Agent Socket**: The start sequence now provisions a `virtserialport` and Unix socket (`sockets/qga.sock`) for QEMU Guest Agent communication on every VM.
+- **TPM Directory Pre-creation**: The `tpm/` subdirectory is now created at `vm create` time along with `logs/` and `sockets/`, preventing race conditions on first `swtpm_setup` run.
+- **Interrupt Cleanup Trap**: A `cleanup_on_signal` handler for `INT`/`TERM` signals tears down virtiofsd daemons, the TPM, and the TAP interface if the VM is interrupted during the startup phase.
+- **VFIO Exit Trap**: The `start` command registers an `EXIT` trap to restore original host PCI drivers when the process exits, ensuring the host audio device is always reclaimed after the VM stops.
+
+### Fixed
+- Log file name corrected from `qemate_vm.log` to `qemate.log` in all VM log directories.
+
+## [4.2.0] - 2026-04-01
+### Changed
+- **Flat Command Interface**: Removed the previous subgroup hierarchy (`vm`, `net`, `share`, `usb`, `security`). All commands are now top-level with hyphenated names. See the table below.
+
+  | Old                          | New                  |
+  |------------------------------|----------------------|
+  | `qemate vm create`           | `qemate create`      |
+  | `qemate vm start`            | `qemate start`       |
+  | `qemate vm stop`             | `qemate stop`        |
+  | `qemate vm delete`           | `qemate delete`      |
+  | `qemate vm resize`           | `qemate resize`      |
+  | `qemate vm list`             | `qemate list`        |
+  | `qemate vm status`           | `qemate status`      |
+  | `qemate vm configure`        | `qemate configure`   |
+  | `qemate net port add`        | `qemate port-add`    |
+  | `qemate net port remove`     | `qemate port-remove` |
+  | `qemate usb add`             | `qemate usb-add`     |
+  | `qemate usb remove`          | `qemate usb-remove`  |
+  | `qemate usb list`            | `qemate usb-list`    |
+  | `qemate share add`           | `qemate share-add`   |
+  | `qemate share remove`        | `qemate share-remove`|
+  | `qemate share list`          | `qemate share-list`  |
+  | `qemate security lock`       | `qemate lock`        |
+  | `qemate security unlock`     | `qemate unlock`      |
+
+- **`configure` Redesign**: The `configure` command no longer accepts `setting value` arguments. It opens the VM config file directly in `$EDITOR`, validates syntax after editing, and automatically restores the previous config if validation fails. The `--raw` flag has been removed (all editing is now raw).
+
+- **Expanded `list` Output**: `vm list` now displays seven columns: `NAME`, `STATUS`, `LOCKED`, `OS`, `AUDIO`, `TPM`, and `SPICE`.
+
+### Added
+- **Physical Disk Passthrough** (`--disk-dev`): The `create` command now accepts `--disk-dev PATH` (e.g. `/dev/sdb`) to use a raw physical block device instead of a qcow2 image. `--disk-size` is ignored when `--disk-dev` is set. Resize is blocked on physical-device VMs.
+- **UEFI Flags on Create**: `--uefi` / `--no-uefi` flags added to `create`, allowing explicit UEFI firmware selection at creation time (default: on for Windows, off for Linux).
+- **Multi-share VirtIO-FS**: `virtiofs` backend now supports multiple simultaneous shared folders, each backed by its own `virtiofsd` daemon and socket.
+- **`resize --force`**: Allows disk resize while the VM is running (requires guest-side online resize support).
+
 ## [4.1.0] - 2026-03-30
 ### Added
+- **Audio passthrough**: PCIe Audio Passthrough to expose a host audio device directly to the guest via VFIO.
 - **Centralized Dependency Pre-flighting**: Implemented `check_vm_dependencies` to validate all required host binaries (`swtpm`, `virtiofsd`, `smbd`) before VM initialization, preventing partial starts and orphaned processes.
 - **Mandatory Field Validation**: The configuration loader now verifies that critical settings (Cores, Memory, Networking, etc.) are present and valid before execution.
 
