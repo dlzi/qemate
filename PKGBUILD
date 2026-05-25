@@ -1,19 +1,21 @@
 # Maintainer: Daniel Zilli <zilli.daniel@gmail.com>
 pkgname=qemate
-pkgver=4.1.0
+pkgver=4.2.2
 pkgrel=1
 pkgdesc="A streamlined command-line utility for managing QEMU virtual machines"
 arch=('any')
 url="https://github.com/dlzi/qemate"
 license=('MIT')
 depends=('bash>=5.0' 'qemu>=9.0.0')
-optdepends=('bash-completion: for command-line completion'
-    'pipewire: for audio support (preferred)'
-    'pulseaudio: for audio support'
-    'alsa-utils: for audio support'
-    'coreutils: for realpath utility'
-    'iproute2: for ss utility'
-    'net-tools: for netstat utility')
+optdepends=('coreutils: for realpath utility'
+    'iproute2: for TAP networking (ip command)'
+    'edk2-ovmf: UEFI firmware for VMs with ENABLE_UEFI=1'
+    'swtpm: TPM 2.0 emulation'
+    'swtpm-tools: TPM initialisation (swtpm_setup)'
+    'virtiofsd: high-performance VirtIO-FS shared folders'
+    'samba: SMB shared folders (smbd)'
+    'passt: unprivileged network backend'
+    'virt-viewer: SPICE display client (remote-viewer)')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
 sha256sums=('SKIP')
 

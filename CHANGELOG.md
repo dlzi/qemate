@@ -2,6 +2,22 @@
 
 All notable changes to Qemate will be documented in this file.
 
+## [4.2.2] - 2026-05-24
+### Changed
+- **`PORT_FORWARDING_ENABLED` config key removed**: This derived flag is no longer stored in VM config files. Port forwarding is now controlled exclusively by the presence of entries in `PORT_FORWARDS`. Existing config files that still contain this key will log a one-time warning on load and continue to work; the key is silently dropped on the next save.
+- **`ENABLE_AUDIO` now warns when unconfigured**: Setting `ENABLE_AUDIO="1"` without a corresponding `AUDIO_PASSTHROUGH_PCI` address now logs a `[WARNING]` at VM start instead of silently doing nothing.
+- **Distro-agnostic error messages**: Runtime error messages for missing OVMF firmware and `passt` no longer reference Arch Linux's `pacman` specifically.
+- **`--help` / bare invocation**: `qemate` with no arguments now exits 0 instead of 1. `resize --force` was accepted by the implementation but absent from the help output; it is now documented.
+
+### Fixed
+- **Startup check now verifies `flock`**: `flock` (from `util-linux`) is required for all config and state operations and is now checked alongside `qemu-system-x86_64` and `qemu-img` at startup.
+
+### Internal
+- OS defaults refactored: the duplicate `LINUX_DEFAULTS` and `WINDOWS_DEFAULTS` arrays are replaced by a shared `_BASE_DEFAULTS` table with per-OS override maps, eliminating duplicated key definitions.
+- Log level rank table moved from a `local -A` declaration rebuilt on every `log_message` call to a single `declare -rA` global (`_LOG_RANK`).
+- `VERSION` constant introduced as `readonly VERSION="4.2.2"` — the single source of truth referenced by `--help` output.
+- Removed unused `vm_name` parameter from `configure_cpu`, `configure_memory`, and `configure_display`.
+
 ## [4.2.1] - 2026-04-18
 ### Changed
 - **Bash-native Parsing**: Replaced `awk` with pure-Bash logic for memory validation (`/proc/meminfo`) and disk size extraction (`qemu-img info --output=json`), eliminating external dependencies.

@@ -13,7 +13,7 @@ Qemate is a streamlined command-line utility for managing QEMU virtual machines 
 - **Networking**: Configure network types (`user`, `passt`, `tap`, `none`), network models (`virtio-net-pci`, `e1000`), and port forwarding with TCP/UDP support.
 - **Audio Support**: Enable PCIe passthrough to expose a host audio device directly to the guest via VFIO.
 - **Performance**: Optimized defaults for Linux and Windows VMs, with KVM acceleration and full VirtIO support.
-- **Display**: SPICE display server with clipboard integration, dynamic resolution, and USB redirect.
+- **Display**: SPICE display server with clipboard integration and dynamic resolution.
 - **USB Passthrough**: Attach and detach host USB devices to VMs by vendor:product ID.
 - **Shared Folders**: Share host directories with guests via VirtFS (9P), VirtIO-FS (multi-share), or QEMU built-in SMB.
 - **TPM 2.0**: Emulated TPM for Windows 11 requirements (via swtpm).
@@ -124,7 +124,6 @@ Qemate uses the syntax: `qemate <command> [vm] [options]`.
   | `NETWORK_TYPE`         | Network backend (`user`, `passt`, `tap`, `none`)        | `user`                   |
   | `NETWORK_MODEL`        | NIC model (`virtio-net-pci`, `e1000`)                   | `virtio-net-pci`         |
   | `BRIDGE_NAME`          | Host bridge interface (tap mode only)                   | `br0`                    |
-  | `PORT_FORWARDING_ENABLED` | Enable port forwarding (`0`/`1`)                    | `1`                      |
   | `PORT_FORWARDS`        | Comma-separated forward specs                           | `8080:80:tcp,53:53:udp`  |
   | `VIDEO_TYPE`           | Video device                                            | `qxl-vga`, `virtio-vga` |
   | `VRAM_SIZE_MB`         | VRAM in MiB                                             | `64`                     |
@@ -214,7 +213,7 @@ Network type, model, and bridge are configured via `qemate configure <n>` (edit 
 |---------|-------------------------------------------------------|
 | `user`  | SLiRP userspace NAT — default, no setup required      |
 | `passt` | Unprivileged, uses host network stack directly         |
-| `tap`   | Kernel-accelerated with vhost-net, requires host bridge |
+| `tap`   | Kernel-accelerated with vhost-net, optionally bridges to a host bridge |
 | `none`  | No network interface                                  |
 
 ### Security Commands
@@ -335,7 +334,7 @@ ls /sys/kernel/iommu_groups/
 sudo modprobe vfio vfio-pci
 ```
 
-**Host audio lost after VM crash**: If the VM crashes without a clean shutdown, the audio device may remain bound to `vfio-pci`. Run `qemate stop <n>` — Qemate will detect the stale state and restore the original drivers. Or rebind manually:
+**Host audio lost after VM crash**: If the VM crashes without a clean shutdown, the audio device may remain bound to `vfio-pci`. Qemate restores the original drivers automatically via an EXIT trap when `qemate start` exits — so if the process is still running, sending it SIGTERM is sufficient. If `qemate start` has already exited without restoring drivers (e.g. killed with SIGKILL), rebind manually:
 ```bash
 echo "0000:01:00.1" | sudo tee /sys/bus/pci/drivers/vfio-pci/unbind
 echo "snd_hda_intel" | sudo tee /sys/bus/pci/devices/0000:01:00.1/driver_override

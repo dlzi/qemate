@@ -64,4 +64,4 @@ done
 
 echo ""
 echo "Installation complete!"
-echo "Run 'qemate help' to get started."
+echo "Run 'qemate --help' to get started."

@@ -21,11 +21,12 @@ umask 0077
 # CONSTANTS & DEFAULTS
 # =============================================================================
 
+readonly VERSION="4.2.1"
 readonly VM_DIR="${QEMATE_VM_DIR:-$HOME/QVMs}"
 readonly LOG_LEVEL="${LOG_LEVEL:-INFO}"
 
-# Linux defaults: high-performance VirtIO stack.
-declare -A LINUX_DEFAULTS=(
+# Shared defaults for all OS types.
+declare -A _BASE_DEFAULTS=(
     [CORES]=2
     [MEMORY]="2G"
     [DISK_SIZE]=40G
@@ -51,30 +52,15 @@ declare -A LINUX_DEFAULTS=(
     [ENABLE_UEFI]=0
 )
 
-# Windows defaults: NVMe disk, Hyper-V enlightenments, SMB shares.
-declare -A WINDOWS_DEFAULTS=(
+# Per-OS overrides — only keys that differ from _BASE_DEFAULTS.
+# Linux: no overrides (virtio disk, UEFI off).
+declare -A _OS_OVERRIDES_linux=()
+# Windows: NVMe disk, larger defaults, UEFI on, Hyper-V enlightenments via SMB shares.
+declare -A _OS_OVERRIDES_windows=(
     [CORES]=4
     [MEMORY]="4G"
     [DISK_SIZE]=60G
-    [NETWORK_TYPE]=user
-    [NETWORK_MODEL]=virtio-net-pci
     [DISK_INTERFACE]=nvme
-    [ENABLE_AUDIO]=0
-    [AUDIO_PASSTHROUGH_PCI]=0
-    [CPU_TYPE]=host
-    [MACHINE_TYPE]=q35
-    [VIDEO_TYPE]="qxl-vga"
-    [VRAM_SIZE_MB]=64
-    [DISK_CACHE]=writeback
-    [DISK_IO]=io_uring
-    [DISK_DISCARD]=unmap
-    [ENABLE_VIRTIO]=1
-    [MEMORY_PREALLOC]=0
-    [MEMORY_SHARE]=0
-    [ENABLE_TPM]=0
-    [SPICE_ENABLED]=0
-    [SPICE_PORT]=5930
-    [SHARE_BACKEND]=auto
     [ENABLE_UEFI]=1
 )
 # =============================================================================
@@ -101,6 +87,9 @@ trap cleanup_on_signal INT TERM
 # LOGGING
 # =============================================================================
 
+# Log level rank table — declared once here instead of inside log_message on every call.
+declare -rA _LOG_RANK=([DEBUG]=0 [INFO]=1 [WARNING]=2 [ERROR]=3)
+
 # log_message LEVEL MESSAGE [VM_NAME]
 # Levels: DEBUG < INFO < WARNING < ERROR (default LOG_LEVEL=INFO)
 # Set LOG_LEVEL=DEBUG to see all output; ERROR to see only errors.
@@ -109,9 +98,8 @@ log_message() {
     local message="${2:-}"
     local vm_name="${3:-}"
 
-    local -A _rank=([DEBUG]=0 [INFO]=1 [WARNING]=2 [ERROR]=3)
-    local msg_rank="${_rank[$level]:-1}"
-    local min_rank="${_rank[${LOG_LEVEL:-INFO}]:-1}"
+    local msg_rank="${_LOG_RANK[$level]:-1}"
+    local min_rank="${_LOG_RANK[${LOG_LEVEL:-INFO}]:-1}"
 
     if (( msg_rank >= min_rank )); then
         echo "[${level}] ${message}"
@@ -226,11 +214,13 @@ split_list() {
 apply_os_defaults() {
     local os_type="$1"
     local -n _vm="$2"
-    local -n _src
-    [[ "$os_type" == "windows" ]] && _src=WINDOWS_DEFAULTS || _src=LINUX_DEFAULTS
     local key
-    for key in "${!_src[@]}"; do
-        _vm[$key]="${_src[$key]}"
+    for key in "${!_BASE_DEFAULTS[@]}"; do
+        _vm[$key]="${_BASE_DEFAULTS[$key]}"
+    done
+    local -n _os_over="_OS_OVERRIDES_${os_type}"
+    for key in "${!_os_over[@]}"; do
+        _vm[$key]="${_os_over[$key]}"
     done
 }
 
@@ -242,7 +232,7 @@ readonly -a CONFIG_KEYS=(
     NAME OS_TYPE MACHINE_TYPE MACHINE_OPTIONS
     CORES MEMORY CPU_TYPE
     NETWORK_TYPE NETWORK_MODEL BRIDGE_NAME MAC_ADDRESS
-    PORT_FORWARDING_ENABLED PORT_FORWARDS
+    PORT_FORWARDS
     VIDEO_TYPE VRAM_SIZE_MB
     DISK_INTERFACE DISK_CACHE DISK_IO DISK_DISCARD DISK_SIZE DISK_DEV
     ENABLE_VIRTIO MEMORY_PREALLOC MEMORY_SHARE
@@ -347,7 +337,7 @@ check_vm_dependencies() {
 
     if [[ "${_deps_vm[ENABLE_UEFI]:-0}" == "1" ]]; then
         local _c="" _v=""
-        find_ovmf _c _v || missing+=("edk2-ovmf (OVMF firmware not found; install with: sudo pacman -S edk2-ovmf)")
+        find_ovmf _c _v || missing+=("edk2-ovmf (OVMF firmware not found; install the edk2-ovmf package for your distribution)")
     fi
 
     if [[ "${_deps_vm[ENABLE_TPM]:-0}" == "1" ]]; then
@@ -460,7 +450,6 @@ manage_network_ports() {
                 new_array+=("$p")
             done
             new_array+=("$normalized")
-            VM[PORT_FORWARDING_ENABLED]=1
             log_message "INFO" "Added port forwarding: $normalized" "$vm_name" ;;
         remove)
             for p in "${port_array[@]}"; do
@@ -468,7 +457,6 @@ manage_network_ports() {
             done
             [[ $found -eq 0 ]] && {
                 log_message "WARNING" "Port rule not found: $normalized" "$vm_name"; return 1; }
-            [[ ${#new_array[@]} -eq 0 ]] && VM[PORT_FORWARDING_ENABLED]=0
             log_message "INFO" "Removed port forwarding: $normalized" "$vm_name" ;;
     esac
 
@@ -846,7 +834,7 @@ configure_uefi() {
 
     local ovmf_code="" ovmf_vars_tmpl=""
     if ! find_ovmf ovmf_code ovmf_vars_tmpl; then
-        log_message "ERROR" "OVMF firmware not found. Install edk2-ovmf (Arch: sudo pacman -S edk2-ovmf)" "$vm_name"
+        log_message "ERROR" "OVMF firmware not found. Install the edk2-ovmf package for your distribution." "$vm_name"
         return 1
     fi
 
@@ -882,9 +870,8 @@ stop_tpm() {
 # =============================================================================
 
 configure_cpu() {
-    local vm_name="$1"
-    local -n _cpu_vm="$2"
-    local -n _cpu_cmd="$3"
+    local -n _cpu_vm="$1"
+    local -n _cpu_cmd="$2"
 
     if [[ "${_cpu_vm[OS_TYPE]:-linux}" == "windows" ]]; then
         local smp_cores=$(( _cpu_vm[CORES] / 2 ))
@@ -913,9 +900,8 @@ configure_cpu() {
 }
 
 configure_memory() {
-    local vm_name="$1"
-    local -n _mem_vm="$2"
-    local -n _mem_cmd="$3"
+    local -n _mem_vm="$1"
+    local -n _mem_cmd="$2"
 
     _mem_cmd+=("-m" "${_mem_vm[MEMORY]}")
     if [[ "${_mem_vm[MEMORY_SHARE]:-0}" == "1" ]]; then
@@ -987,10 +973,9 @@ configure_disk() {
 }
 
 configure_display() {
-    local vm_name="$1"
-    local -n _dsp_vm="$2"
-    local -n _dsp_cmd="$3"
-    local headless="$4"
+    local -n _dsp_vm="$1"
+    local -n _dsp_cmd="$2"
+    local headless="$3"
 
     if [[ "$headless" == "1" ]]; then
         _dsp_cmd+=("-display" "none"); return 0
@@ -1064,7 +1049,7 @@ configure_network() {
                 fi
             fi
 
-            if [[ "${_net_vm[PORT_FORWARDING_ENABLED]:-0}" == "1" && -n "${_net_vm[PORT_FORWARDS]:-}" ]]; then
+            if [[ -n "${_net_vm[PORT_FORWARDS]:-}" ]]; then
                 local fwds=(); split_list "${_net_vm[PORT_FORWARDS]}" fwds
                 local fwd
                 for fwd in "${fwds[@]}"; do
@@ -1078,10 +1063,10 @@ configure_network() {
             log_message "INFO" "Network: user/NAT (SLiRP)" "$vm_name" ;;
 
         passt)
-            command -v passt &>/dev/null || { log_message "ERROR" "passt not found. Install it (e.g. pacman -S passt)" "$vm_name"; return 1; }
+            command -v passt &>/dev/null || { log_message "ERROR" "passt not found. Install the passt package for your distribution." "$vm_name"; return 1; }
             local passt_opts="passt,id=net0"
 
-            if [[ "${_net_vm[PORT_FORWARDING_ENABLED]:-0}" == "1" && -n "${_net_vm[PORT_FORWARDS]:-}" ]]; then
+            if [[ -n "${_net_vm[PORT_FORWARDS]:-}" ]]; then
                 local fwds=(); split_list "${_net_vm[PORT_FORWARDS]}" fwds
                 local fwd
                 for fwd in "${fwds[@]}"; do
@@ -1132,7 +1117,10 @@ configure_audio() {
 
     [[ "${_aud_conf[ENABLE_AUDIO]:-0}" != "1" ]] && return 0
     local pci_spec="${_aud_conf[AUDIO_PASSTHROUGH_PCI]:-}"
-    [[ -z "$pci_spec" || "$pci_spec" == "0" ]] && return 0
+    if [[ -z "$pci_spec" || "$pci_spec" == "0" ]]; then
+        log_message "WARNING" "ENABLE_AUDIO=1 but AUDIO_PASSTHROUGH_PCI is not set — audio passthrough is inactive. Set AUDIO_PASSTHROUGH_PCI to a PCI address (e.g. 00:1f.3) in the VM config." "$vm_name"
+        return 0
+    fi
 
     local pci_id="$pci_spec"
     [[ ! "$pci_id" =~ ^[0-9a-fA-F]{4}: ]] && pci_id="0000:$pci_id"
@@ -1328,7 +1316,7 @@ configure_tpm() {
     fi
 
     swtpm socket --tpm2 --tpmstate "dir=$tpm_dir" --ctrl "type=unixio,path=$tpm_sock" \
-        --daemon --pid "file=$tpm_pid" --log "level=0"
+        --daemon --pid "file=$tpm_pid" --log "level=0" || true
 
     local i
     for (( i=0; i<20; i++ )); do
@@ -1390,8 +1378,7 @@ create() {
         [[ ! "$memory" =~ ^([0-9]+)([GMgm])$ ]] && {
             log_message "ERROR" "Invalid memory: '$memory'. Use e.g. 4G or 2048M"; return 1; }
         local mem_val="${BASH_REMATCH[1]}" mem_unit="${BASH_REMATCH[2]}"
-        
-        # Bash native memory check replacing awk
+
         if [[ -f /proc/meminfo ]]; then
             local avail=0 key val _
             while IFS=': ' read -r key val _; do
@@ -1441,7 +1428,6 @@ create() {
     VM[OS_TYPE]="$os_type"
     VM[MAC_ADDRESS]=$(generate_mac_address "$vm_name")
     VM[LOCKED]="0"
-    VM[PORT_FORWARDING_ENABLED]="0"
     VM[PORT_FORWARDS]=""
     VM[USB_DEVICES]=""
     VM[SHARED_FOLDERS]=""
@@ -1512,7 +1498,6 @@ start() {
 
     log_message "INFO" "Starting VM: $vm_name" "$vm_name"
 
-    # ←←← Everything after this point is the real start logic (unchanged) ←←←
     [[ "${VM[MACHINE_OPTIONS]}" =~ accel=kvm ]] && [[ ! -w /dev/kvm ]] && {
         log_message "ERROR" "/dev/kvm not writable. Run: sudo usermod -aG kvm $USER"
         return 1
@@ -1534,8 +1519,8 @@ start() {
     )
 
     configure_uefi "$vm_name" VM qemu_cmd || return 1
-    configure_cpu "$vm_name" VM qemu_cmd
-    configure_memory "$vm_name" VM qemu_cmd
+    configure_cpu VM qemu_cmd
+    configure_memory VM qemu_cmd
 
     qemu_cmd+=(
         "-device" "qemu-xhci,id=usb,bus=pcie.0"
@@ -1545,7 +1530,7 @@ start() {
         "-chardev" "socket,id=chara0,path=$VM_DIR/$vm_name/sockets/qga.sock,server=on,wait=off"
     )
 
-    configure_display "$vm_name" VM qemu_cmd "$headless"
+    configure_display VM qemu_cmd "$headless"
     configure_disk "$vm_name" VM qemu_cmd
 
     if [[ -n "$iso_file" ]]; then
@@ -1688,7 +1673,6 @@ resize_disk() {
     qemu-img resize "$VM_DIR/$vm_name/disk.qcow2" "$new_size" || {
         log_message "ERROR" "Resize failed." "$vm_name"; return 1; }
 
-    # Parse qemu-img JSON directly via Bash Regex instead of piping grep
     local json bytes_size=""
     json=$(qemu-img info --output=json "$VM_DIR/$vm_name/disk.qcow2")
     if [[ "$json" =~ \"virtual-size\":[[:space:]]*([0-9]+) ]]; then
@@ -1818,8 +1802,8 @@ lock_unlock() {
 # =============================================================================
 
 display_help() {
-    cat <<'EOF'
-QEMATE v4.2.1 — QEMU VM Manager
+    cat <<EOF
+QEMATE v${VERSION} — QEMU VM Manager
 ────────────────────────────────────────────────────────────────────────
 
 USAGE
@@ -1841,10 +1825,10 @@ VM
   start   <name> [--headless] [--iso PATH] [--virtio-iso PATH] [--debug]
   stop    <name> [--force]
   delete  <name> [--force]
-  resize  <name> <SIZE|+SIZE>
+  resize  <name> <SIZE|+SIZE> [--force]   --force allows resize while VM is running
   list
   status  <name>
-  config  <name>     edit VM config in $EDITOR
+  config  <name>     edit VM config in \$EDITOR
 
 NETWORK
   port-add    <name> <[ip:]host:guest[:tcp|udp]>
@@ -1878,10 +1862,10 @@ main() {
     done
 
     mkdir -p "$VM_DIR"
-    [[ $# -eq 0 ]] && { display_help; exit 1; }
+    [[ $# -eq 0 ]] && { display_help; exit 0; }
 
     local cmd
-    for cmd in qemu-system-x86_64 qemu-img; do
+    for cmd in qemu-system-x86_64 qemu-img flock; do
         command -v "$cmd" &>/dev/null || {
             echo "Error: required binary '$cmd' not found in PATH." >&2; exit 1; }
     done
@@ -1894,7 +1878,7 @@ main() {
         delete)        [[ $# -eq 0 ]] && { echo "Error: VM name required"; exit 1; }; delete      "$@" ;;
         resize)        [[ $# -eq 0 ]] && { echo "Error: VM name required"; exit 1; }; resize_disk "$@" ;;
         status)        [[ $# -eq 0 ]] && { echo "Error: VM name required"; exit 1; }; status      "$@" ;;
-        configure)     [[ $# -eq 0 ]] && { echo "Error: VM name required"; exit 1; }; configure   "$@" ;;
+        configure|config) [[ $# -eq 0 ]] && { echo "Error: VM name required"; exit 1; }; configure   "$@" ;;
         list)          list ;;
         port-add)      [[ $# -lt 2 ]] && { echo "Error: VM name and port spec required"; exit 1; }
                        manage_network_ports "$1" "add"    "$2" ;;
