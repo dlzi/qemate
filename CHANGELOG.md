@@ -2,15 +2,29 @@
 
 All notable changes to Qemate will be documented in this file.
 
+## [4.2.3] - 2026-07-15
+### Security and reliability
+- Validate VM names before installing lifecycle traps or constructing cleanup paths.
+- Keep flock lock inodes stable instead of unlinking lock files during release.
+- Centralize start cleanup and verify QEMU/helper process identity before signaling.
+- Parse lock state through the validated configuration loader and harden VM directory modes.
+- Fail closed when requested TPM or VirtIO-FS resources cannot be initialized.
+- Validate additional QEMU option fields and preserve passt host bind addresses.
+
 ## [4.2.2] - 2026-05-24
 ### Changed
 - **`PORT_FORWARDING_ENABLED` config key removed**: This derived flag is no longer stored in VM config files. Port forwarding is now controlled exclusively by the presence of entries in `PORT_FORWARDS`. Existing config files that still contain this key will log a one-time warning on load and continue to work; the key is silently dropped on the next save.
 - **`ENABLE_AUDIO` now warns when unconfigured**: Setting `ENABLE_AUDIO="1"` without a corresponding `AUDIO_PASSTHROUGH_PCI` address now logs a `[WARNING]` at VM start instead of silently doing nothing.
 - **Distro-agnostic error messages**: Runtime error messages for missing OVMF firmware and `passt` no longer reference Arch Linux's `pacman` specifically.
-- **`--help` / bare invocation**: `qemate` with no arguments now exits 0 instead of 1. `resize --force` was accepted by the implementation but absent from the help output; it is now documented.
+- **`--help` / bare invocation**: `qemate` with no arguments now exits 0 instead of 1. `resize --force` remains accepted for CLI compatibility, but live qcow2 resizing is refused until QMP-based online resize support is implemented.
 
 ### Fixed
 - **Startup check now verifies `flock`**: `flock` (from `util-linux`) is required for all config and state operations and is now checked alongside `qemu-system-x86_64` and `qemu-img` at startup.
+- **Windows no-share startup**: Windows VMs no longer require `smbd` when no shared folders are configured.
+- **Safe config editing rollback**: `configure` now restores the previous config if the editor exits with an error.
+- **Odd-core Windows topology**: Windows CPU topology now remains valid for odd vCPU counts and single-core VMs.
+- **Installer/package layout tolerance**: `install.sh`, `Makefile`, and `PKGBUILD` now support both root-level and `src/` / `docs/man/` layouts, and skip absent optional docs instead of failing.
+- **Config validation**: Loaded configs now validate enum values, booleans, sizes, port rules, USB IDs, and share tags before use.
 
 ### Internal
 - OS defaults refactored: the duplicate `LINUX_DEFAULTS` and `WINDOWS_DEFAULTS` arrays are replaced by a shared `_BASE_DEFAULTS` table with per-OS override maps, eliminating duplicated key definitions.
@@ -65,7 +79,7 @@ All notable changes to Qemate will be documented in this file.
 - **Physical Disk Passthrough** (`--disk-dev`): The `create` command now accepts `--disk-dev PATH` (e.g. `/dev/sdb`) to use a raw physical block device instead of a qcow2 image. `--disk-size` is ignored when `--disk-dev` is set. Resize is blocked on physical-device VMs.
 - **UEFI Flags on Create**: `--uefi` / `--no-uefi` flags added to `create`, allowing explicit UEFI firmware selection at creation time (default: on for Windows, off for Linux).
 - **Multi-share VirtIO-FS**: `virtiofs` backend now supports multiple simultaneous shared folders, each backed by its own `virtiofsd` daemon and socket.
-- **`resize --force`**: Allows disk resize while the VM is running (requires guest-side online resize support).
+- **`resize --force`**: Added as a reserved CLI-compatible flag. Live resize is intentionally refused until QMP-based online resize support is available.
 
 ## [4.1.0] - 2026-03-30
 ### Added

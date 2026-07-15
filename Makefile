@@ -2,9 +2,12 @@
 # Default installation paths
 PREFIX ?= /usr/local
 BINDIR ?= $(PREFIX)/bin
-LIBDIR ?= $(PREFIX)/share/qemate
 DOCDIR ?= $(PREFIX)/share/doc/qemate
 MANDIR ?= $(PREFIX)/share/man/man1
+
+SCRIPT_SRC := $(if $(wildcard src/qemate.sh),src/qemate.sh,qemate.sh)
+MAN_SRC := $(if $(wildcard docs/man/qemate.1),docs/man/qemate.1,qemate.1)
+DOCS := $(wildcard README.md CHANGELOG.md LICENSE)
 
 # No build step needed for Bash scripts
 all:
@@ -12,19 +15,13 @@ all:
 
 install:
 	@echo "Installing Qemate..."
+	@test -f $(SCRIPT_SRC) || { echo "qemate.sh not found"; exit 1; }
 	@install -d $(DESTDIR)$(BINDIR)
 	@install -d $(DESTDIR)$(DOCDIR)
 	@install -d $(DESTDIR)$(MANDIR)
-	
-	# Install the script
-	@install -m 755 src/qemate.sh $(DESTDIR)$(BINDIR)/qemate
-	
-	# Install documentation
-	@install -m 644 README.md $(DESTDIR)$(DOCDIR)/
-	@install -m 644 CHANGELOG.md $(DESTDIR)$(DOCDIR)/
-	@install -m 644 LICENSE $(DESTDIR)$(DOCDIR)/
-	@install -m 644 docs/man/qemate.1 $(DESTDIR)$(MANDIR)/
-	
+	@install -m 755 $(SCRIPT_SRC) $(DESTDIR)$(BINDIR)/qemate
+	@for doc in $(DOCS); do install -m 644 $$doc $(DESTDIR)$(DOCDIR)/; done
+	@if [ -f $(MAN_SRC) ]; then install -m 644 $(MAN_SRC) $(DESTDIR)$(MANDIR)/qemate.1; else echo "Warning: man page not found; skipping."; fi
 	@echo "Installation complete!"
 
 uninstall:
@@ -36,28 +33,20 @@ uninstall:
 
 clean:
 	@echo "Cleaning up build artifacts..."
-	@rm -f *~
-	@rm -f *.bak
-	@rm -f *.log
-	@rm -f *.tar.gz
-	@rm -rf dist
-	@rm -rf build
-	@rm -rf __pycache__
+	@rm -f *~ *.bak *.log *.tar.gz
+	@rm -rf dist build __pycache__
 	@echo "Clean complete!"
 
 # For makepkg/pacman package building cleanup
 pkgclean:
 	@echo "Cleaning up package build artifacts..."
-	@rm -rf src/qemate-*
-	@rm -rf pkg
-	@rm -f *.pkg.tar.zst
-	@rm -f *.pkg.tar.xz
+	@rm -rf src/qemate-* pkg
+	@rm -f *.pkg.tar.zst *.pkg.tar.xz
 	@echo "Package clean complete!"
 
 distclean: clean pkgclean
 	@echo "Performing deep clean..."
-	@rm -rf .venv
-	@rm -rf .cache
+	@rm -rf .venv .cache
 	@echo "Deep clean complete!"
 
 .PHONY: all install uninstall clean pkgclean distclean

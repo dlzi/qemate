@@ -1,6 +1,6 @@
 # Maintainer: Daniel Zilli <zilli.daniel@gmail.com>
 pkgname=qemate
-pkgver=4.2.2
+pkgver=4.2.3
 pkgrel=1
 pkgdesc="A streamlined command-line utility for managing QEMU virtual machines"
 arch=('any')
@@ -22,12 +22,22 @@ sha256sums=('SKIP')
 package() {
     cd "$srcdir/$pkgname-$pkgver"
 
-    # Install main script
-    install -Dm755 src/qemate.sh "$pkgdir/usr/bin/qemate"
-    # Install documentation
-    install -d "$pkgdir/usr/share/doc/qemate"
-    install -Dm644 README.md "$pkgdir/usr/share/doc/qemate/"
-    install -Dm644 CHANGELOG.md "$pkgdir/usr/share/doc/qemate/"
-    install -Dm644 LICENSE "$pkgdir/usr/share/doc/qemate/"
-    install -Dm644 docs/man/qemate.1 "$pkgdir/usr/share/man/man1/qemate.1"
+    local script_src man_src
+    if [[ -f src/qemate.sh ]]; then
+        script_src="src/qemate.sh"
+    else
+        script_src="qemate.sh"
+    fi
+
+    if [[ -f docs/man/qemate.1 ]]; then
+        man_src="docs/man/qemate.1"
+    else
+        man_src="qemate.1"
+    fi
+
+    install -Dm755 "$script_src" "$pkgdir/usr/bin/qemate"
+    install -Dm644 README.md "$pkgdir/usr/share/doc/qemate/README.md"
+    install -Dm644 CHANGELOG.md "$pkgdir/usr/share/doc/qemate/CHANGELOG.md"
+    [[ -f LICENSE ]] && install -Dm644 LICENSE "$pkgdir/usr/share/doc/qemate/LICENSE"
+    [[ -f "$man_src" ]] && install -Dm644 "$man_src" "$pkgdir/usr/share/man/man1/qemate.1"
 }

@@ -1,4 +1,4 @@
-.TH QEMATE 1 "May 24, 2026" "Qemate 4.2.2" "User Commands"
+.TH QEMATE 1 "July 15, 2026" "Qemate 4.2.3" "User Commands"
 .SH NAME
 qemate \- Hardened QEMU virtual machine manager for Linux
 .SH SYNOPSIS
@@ -84,7 +84,7 @@ Delete a VM and all its data. Prompts for confirmation unless \fB--force\fR is u
 
 .TP
 .B resize NAME SIZE|+SIZE [--force]
-Resize the VM disk image (e.g., \fB80G\fR or \fB+20G\fR). Prevents accidental shrinking. VM must be stopped unless \fB--force\fR is used (requires guest-side online resize support). Not supported for physical-device VMs (\fB--disk-dev\fR).
+Resize the VM disk image (e.g., \fB80G\fR or \fB+20G\fR). The VM must be stopped. \fB--force\fR is accepted for CLI compatibility but does not allow live qcow2 resizing. Not supported for physical-device VMs (\fB--disk-dev\fR).
 
 .TP
 .B list
@@ -170,7 +170,7 @@ Picks the best available backend: virtiofs \(-> virtfs for Linux guests, smb for
 High-performance VirtIO-FS. Supports multiple simultaneous shared folders. Requires \fBvirtiofsd\fR. Windows guests also need WinFSP and the VirtIO-FS driver.
 .TP
 .B smb
-QEMU built-in Samba share. Windows guests only; limited to one folder. No extra host dependencies.
+QEMU user-mode SMB share. Windows guests only; limited to one folder. Requires \fBsmbd\fR from Samba on the host and NETWORK_TYPE=user or nat.
 
 .SH SECURITY & CONCURRENCY
 Qemate implements strict \fBflock\fR-based locking on configuration files to prevent race conditions during simultaneous CLI commands. The script operates with a \fBumask 0077\fR to ensure all created files are accessible only by the owner. Config files are loaded via a strict regex-based lexer with key whitelisting — \fBsource\fR is never used, preventing arbitrary code execution from modified config files. Config file ownership and permissions (\fB600\fR) are verified and enforced on every load.
@@ -235,9 +235,10 @@ Forward a web port:
 qemate port-add myvm 8080:80:tcp
 .EE
 
-Resize a disk while the VM is running:
+Resize a stopped VM disk:
 .EX
-qemate resize myvm +20G --force
+qemate stop myvm
+qemate resize myvm +20G
 .EE
 
 .SH AUTHOR

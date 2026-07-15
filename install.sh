@@ -1,11 +1,33 @@
 #!/bin/bash
 # Qemate Installation Script
 
-set -e
+set -euo pipefail
+
+PROJECT_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+
+for arg in "$@"; do
+    case "$arg" in
+        PREFIX=*) PREFIX="${arg#PREFIX=}" ;;
+        BINDIR=*) BINDIR="${arg#BINDIR=}" ;;
+        DOCDIR=*) DOCDIR="${arg#DOCDIR=}" ;;
+        MANDIR=*) MANDIR="${arg#MANDIR=}" ;;
+        *) echo "Error: unknown argument '$arg'. Use PREFIX=, BINDIR=, DOCDIR=, or MANDIR=."; exit 1 ;;
+    esac
+done
 
 # Check dependencies
 if ! command -v qemu-system-x86_64 &> /dev/null; then
     echo "Error: qemu-system-x86_64 not found. Please install QEMU version 9.0 or higher."
+    exit 1
+fi
+
+if ! command -v qemu-img &> /dev/null; then
+    echo "Error: qemu-img not found. Please install QEMU version 9.0 or higher."
+    exit 1
+fi
+
+if ! command -v flock &> /dev/null; then
+    echo "Error: flock not found. Please install util-linux."
     exit 1
 fi
 
@@ -14,7 +36,8 @@ if [[ "${BASH_VERSION%%.*}" -lt 5 ]]; then
     exit 1
 fi
 
-if ! [[ $(qemu-system-x86_64 --version 2> /dev/null | grep -oE '[0-9]+' | head -1) -ge 9 ]]; then
+qemu_major=$(qemu-system-x86_64 --version 2> /dev/null | grep -oE '[0-9]+' | head -1 || true)
+if [[ -z "$qemu_major" || "$qemu_major" -lt 9 ]]; then
     echo "Error: QEMU 9.0 or higher is required. Please upgrade QEMU."
     exit 1
 fi
@@ -24,6 +47,23 @@ PREFIX="${PREFIX:-/usr/local}"
 BINDIR="${BINDIR:-$PREFIX/bin}"
 DOCDIR="${DOCDIR:-$PREFIX/share/doc/qemate}"
 MANDIR="${MANDIR:-$PREFIX/share/man/man1}"
+
+SCRIPT_SRC=""
+if [[ -f "$PROJECT_ROOT/src/qemate.sh" ]]; then
+    SCRIPT_SRC="$PROJECT_ROOT/src/qemate.sh"
+elif [[ -f "$PROJECT_ROOT/qemate.sh" ]]; then
+    SCRIPT_SRC="$PROJECT_ROOT/qemate.sh"
+else
+    echo "Error: qemate.sh not found next to install.sh or under src/."
+    exit 1
+fi
+
+MAN_SRC=""
+if [[ -f "$PROJECT_ROOT/docs/man/qemate.1" ]]; then
+    MAN_SRC="$PROJECT_ROOT/docs/man/qemate.1"
+elif [[ -f "$PROJECT_ROOT/qemate.1" ]]; then
+    MAN_SRC="$PROJECT_ROOT/qemate.1"
+fi
 
 # Print header
 echo "=== Qemate Installation ==="
@@ -44,23 +84,30 @@ done
 
 # Install the script
 echo "Installing the script..."
-install -m 755 src/qemate.sh "$BINDIR/qemate" || {
-    echo "Failed to install qemate.sh"
+install -m 755 "$SCRIPT_SRC" "$BINDIR/qemate" || {
+    echo "Failed to install $SCRIPT_SRC"
     exit 1
 }
 
 # Install documentation
 echo "Installing documentation..."
 for doc in README.md CHANGELOG.md LICENSE; do
-    [ -f "$doc" ] && install -m 644 "$doc" "$DOCDIR/" || {
-        echo "Failed to install $doc"
+    if [[ -f "$PROJECT_ROOT/$doc" ]]; then
+        install -m 644 "$PROJECT_ROOT/$doc" "$DOCDIR/" || {
+            echo "Failed to install $doc"
+            exit 1
+        }
+    fi
+done
+
+if [[ -n "$MAN_SRC" ]]; then
+    install -m 644 "$MAN_SRC" "$MANDIR/qemate.1" || {
+        echo "Failed to install man page"
         exit 1
     }
-done
-[ -f docs/man/qemate.1 ] && install -m 644 docs/man/qemate.1 "$MANDIR/" || {
-    echo "Failed to install man page"
-    exit 1
-}
+else
+    echo "Warning: man page not found; skipping."
+fi
 
 echo ""
 echo "Installation complete!"

@@ -15,7 +15,7 @@ Qemate is a streamlined command-line utility for managing QEMU virtual machines 
 - **Performance**: Optimized defaults for Linux and Windows VMs, with KVM acceleration and full VirtIO support.
 - **Display**: SPICE display server with clipboard integration and dynamic resolution.
 - **USB Passthrough**: Attach and detach host USB devices to VMs by vendor:product ID.
-- **Shared Folders**: Share host directories with guests via VirtFS (9P), VirtIO-FS (multi-share), or QEMU built-in SMB.
+- **Shared Folders**: Share host directories with guests via VirtFS (9P), VirtIO-FS (multi-share), or QEMU user-mode SMB.
 - **TPM 2.0**: Emulated TPM for Windows 11 requirements (via swtpm).
 - **Logging**: Detailed logs with configurable verbosity (`LOG_LEVEL`: DEBUG, INFO, WARNING, ERROR).
 
@@ -101,7 +101,7 @@ Qemate uses the syntax: `qemate <command> [vm] [options]`.
   Deletes a VM and all its data. Prompts for confirmation unless `--force` is used. Locked VMs require `--force`.
 
 - `qemate resize <n> <SIZE|+SIZE> [--force]`
-  Resizes the VM's disk image (e.g. `80G`, `+20G`). VM must be stopped unless `--force` is used (requires guest-side online resize support). Not supported for physical device VMs (`--disk-dev`).
+  Resizes the VM's disk image (e.g. `80G`, `+20G`). The VM must be stopped; `--force` is reserved for CLI compatibility and does not allow live qcow2 resizing. Not supported for physical device VMs (`--disk-dev`).
 
 - `qemate list`
   Lists all VMs with seven columns: `NAME`, `STATUS`, `LOCKED`, `OS`, `AUDIO`, `TPM`, `SPICE`.
@@ -192,7 +192,7 @@ Set the backend via `qemate configure <n>` (edit `SHARE_BACKEND`):
 |------------|---------------------------------------------------------------|-----------------------------------------------------------------------|
 | `auto`     | Picks best available: virtiofs > virtfs (Linux) / smb (Windows) | —                                                                  |
 | `virtfs`   | 9P filesystem, Linux guests, no extra dependencies            | `mount -t 9p -o trans=virtio,version=9p2000.L <tag> /mnt/<tag>`      |
-| `smb`      | QEMU built-in Samba, Windows plug-and-play, one folder only   | `\\10.0.2.4\qemu` in Explorer                                         |
+| `smb`      | QEMU user-mode SMB, Windows plug-and-play, one folder only; requires host `smbd` and `NETWORK_TYPE=user`/`nat` | `\\10.0.2.4\qemu` in Explorer |
 | `virtiofs` | Best performance, multiple folders; requires virtiofsd        | Windows: WinFSP + VirtIO-FS driver; Linux: `mount -t virtiofs <tag> /mnt/<tag>` |
 
 ### Network Commands
@@ -367,7 +367,7 @@ Ensure both `swtpm` and `swtpm_setup` (from `swtpm-tools`) are installed. Check 
 
 ### Shared Folder (SMB) Issues on Windows 10 LTSC 2021
 
-QEMU's built-in SMB share uses SMB 1.0, which is disabled by default on Windows 10. Follow these steps to enable it:
+QEMU's user-mode SMB share uses SMB 1.0, which is disabled by default on Windows 10. Follow these steps to enable it:
 
 1. **Enable SMB 1.0 feature**:
    `Control Panel → Programs → Programs and Features → Turn Windows features on or off → SMB 1.0/CIFS File Sharing Support` → check and confirm.
@@ -401,7 +401,7 @@ Check logs at:
 
 ## Contributing
 
-Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for details. Key guidelines:
+Contributions are welcome. Key guidelines:
 - Follow the Google Shell Style Guide.
 - Use 4-space indentation.
 - Update `README.md`, `CHANGELOG.md`, and `VERSION` for changes.
@@ -409,7 +409,7 @@ Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for details. K
 
 ## License
 
-Qemate is released under the [MIT License](LICENSE).
+Qemate is released under the MIT License.
 
 ## Author
 

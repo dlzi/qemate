@@ -2,7 +2,7 @@
 # =============================================================================
 # qemate — Streamlined QEMU Virtual Machine Management Utility
 #
-# VERSION:  4.2.1
+# VERSION:  4.2.3
 # LICENSE:  MIT
 # =============================================================================
 
@@ -21,7 +21,7 @@ umask 0077
 # CONSTANTS & DEFAULTS
 # =============================================================================
 
-readonly VERSION="4.2.1"
+readonly VERSION="4.2.3"
 readonly VM_DIR="${QEMATE_VM_DIR:-$HOME/QVMs}"
 readonly LOG_LEVEL="${LOG_LEVEL:-INFO}"
 
@@ -67,17 +67,59 @@ declare -A _OS_OVERRIDES_windows=(
 
 declare -g QEMATE_ACTIVE_VM=""
 declare -g QEMATE_PHASE=""
+declare -g QEMATE_CLEANUP_DONE=0
+
+vm_pid_matches() {
+    local vm_name="$1" pid="$2"
+    [[ "$pid" =~ ^[0-9]+$ && -r "/proc/$pid/cmdline" ]] || return 1
+
+    local -a args=()
+    mapfile -d '' -t args < "/proc/$pid/cmdline" 2>/dev/null || return 1
+    local i
+    for (( i = 0; i + 1 < ${#args[@]}; i++ )); do
+        if [[ "${args[i]}" == "-name" && "${args[i + 1]}" == "${vm_name},process=${vm_name}" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+pid_cmdline_contains() {
+    local pid="$1" needle="$2"
+    [[ "$pid" =~ ^[0-9]+$ && -r "/proc/$pid/cmdline" ]] || return 1
+    local -a args=()
+    mapfile -d '' -t args < "/proc/$pid/cmdline" 2>/dev/null || return 1
+    local arg
+    for arg in "${args[@]}"; do
+        [[ "$arg" == *"$needle"* ]] && return 0
+    done
+    return 1
+}
+
+cleanup_active_vm() {
+    [[ "$QEMATE_CLEANUP_DONE" -eq 0 ]] || return 0
+    [[ -n "$QEMATE_ACTIVE_VM" && "$QEMATE_PHASE" =~ ^(starting|running)$ ]] || return 0
+    QEMATE_CLEANUP_DONE=1
+
+    log_message "DEBUG" "Cleaning up: $QEMATE_ACTIVE_VM"
+    local pidfile="$VM_DIR/$QEMATE_ACTIVE_VM/qemu.pid" pid=""
+    if [[ -f "$pidfile" ]]; then
+        read -r pid < "$pidfile" || true
+        if vm_pid_matches "$QEMATE_ACTIVE_VM" "$pid"; then
+            kill "$pid" 2>/dev/null || true
+        fi
+        [[ "$(< "$pidfile")" == "$pid" ]] && rm -f "$pidfile"
+    fi
+    stop_virtiofsd_daemons  "$QEMATE_ACTIVE_VM" 2>/dev/null || true
+    stop_tpm                "$QEMATE_ACTIVE_VM" 2>/dev/null || true
+    teardown_tap_interface "$QEMATE_ACTIVE_VM" 2>/dev/null || true
+    restore_group_drivers   "$QEMATE_ACTIVE_VM" 2>/dev/null || true
+}
 
 # Clean up orphaned daemons and lock files when interrupted during launch.
 cleanup_on_signal() {
     local exit_code=$?
-    if [[ "$QEMATE_PHASE" == "starting" && -n "$QEMATE_ACTIVE_VM" ]]; then
-        log_message "WARNING" "Launch interrupted. Cleaning up: $QEMATE_ACTIVE_VM"
-        stop_virtiofsd_daemons  "$QEMATE_ACTIVE_VM" 2>/dev/null
-        stop_tpm                "$QEMATE_ACTIVE_VM" 2>/dev/null
-        teardown_tap_interface  "$QEMATE_ACTIVE_VM" 2>/dev/null
-        rm -f "${VM_DIR:?}/${QEMATE_ACTIVE_VM:?}/qemu.pid.lock" 2>/dev/null
-    fi
+    cleanup_active_vm
     exit "$exit_code"
 }
 
@@ -123,18 +165,12 @@ vm_exists() { [[ -d "$VM_DIR/$1" ]]; }
 # vm_is_running VM_NAME — returns 0 if QEMU is live and owns the PID file.
 vm_is_running() {
     local vm_name="$1" pidfile="$VM_DIR/$1/qemu.pid"
+    validate_vm_name "$vm_name" >/dev/null 2>&1 || return 1
     [[ -f "$pidfile" ]] || return 1
 
     local pid
     read -r pid < "$pidfile"
-    if kill -0 "$pid" 2>/dev/null; then
-        local cmdline
-        # /proc/PID/cmdline separates arguments with NUL bytes.
-        # read -d '' stops at the first NUL, returning only argv[0].
-        # tr replaces all NULs with spaces so the full argument list is searchable.
-        cmdline=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null) || true
-        [[ "$cmdline" == *"process=${vm_name}"* ]] && return 0
-    fi
+    kill -0 "$pid" 2>/dev/null && vm_pid_matches "$vm_name" "$pid" && return 0
 
     local lockfile="$pidfile.lock" _fd
     if acquire_flock "$lockfile" _fd; then
@@ -146,8 +182,9 @@ vm_is_running() {
 }
 
 vm_is_locked() {
-    local config_file="$VM_DIR/$1/config"
-    [[ -f "$config_file" ]] && grep -q '^LOCKED="1"' "$config_file"
+    validate_vm_name "$1" >/dev/null 2>&1 || return 1
+    local -A VM=()
+    load_vm_config "$1" VM >/dev/null 2>&1 && [[ "${VM[LOCKED]:-0}" == "1" ]]
 }
 
 validate_vm_name() {
@@ -193,7 +230,6 @@ release_flock() {
     local lockfile="$2"
     flock -u "$_rf_fd"
     exec {_rf_fd}>&-
-    rm -f "$lockfile"
 }
 
 # split_list RAW_CSV OUTPUT_ARRAY_NAMEREF — splits a comma-separated string.
@@ -242,9 +278,164 @@ readonly -a CONFIG_KEYS=(
     LOCKED
 )
 
+
+quote_config_value() {
+    local value="${1-}"
+    if [[ "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
+        return 1
+    fi
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    printf '"%s"' "$value"
+}
+
+unquote_config_value() {
+    local value="$1"
+    local out="" char next i
+    for (( i=0; i<${#value}; i++ )); do
+        char="${value:i:1}"
+        if [[ "$char" == "\\" && $(( i + 1 )) -lt ${#value} ]]; then
+            next="${value:i+1:1}"
+            case "$next" in
+                '\\'|'"') out+="$next"; (( i++ )) ;;
+                *) out+="$char" ;;
+            esac
+        else
+            out+="$char"
+        fi
+    done
+    printf '%s' "$out"
+}
+
+validate_vm_config_values() {
+    local vm_name="$1"
+    local -n _vcv_vm="$2"
+    local key value base_video
+
+    validate_vm_name "${_vcv_vm[NAME]:-}" || return 1
+    [[ "${_vcv_vm[NAME]}" == "$vm_name" ]] || {
+        log_message "ERROR" "Config NAME '${_vcv_vm[NAME]}' does not match VM directory '$vm_name'" "$vm_name"
+        return 1
+    }
+
+    case "${_vcv_vm[OS_TYPE]:-}" in
+        linux|windows) ;;
+        *) log_message "ERROR" "Invalid OS_TYPE: '${_vcv_vm[OS_TYPE]:-}'" "$vm_name"; return 1 ;;
+    esac
+
+    [[ "${_vcv_vm[CORES]:-}" =~ ^[0-9]+$ && "${_vcv_vm[CORES]}" -ge 1 && "${_vcv_vm[CORES]}" -le 64 ]] || {
+        log_message "ERROR" "Invalid CORES: '${_vcv_vm[CORES]:-}' (must be 1-64)" "$vm_name"; return 1; }
+    [[ "${_vcv_vm[MEMORY]:-}" =~ ^[0-9]+[GMgm]$ ]] || {
+        log_message "ERROR" "Invalid MEMORY: '${_vcv_vm[MEMORY]:-}' (use e.g. 4G or 2048M)" "$vm_name"; return 1; }
+
+    case "${_vcv_vm[NETWORK_TYPE]:-}" in
+        user|nat|passt|tap|none) ;;
+        *) log_message "ERROR" "Invalid NETWORK_TYPE: '${_vcv_vm[NETWORK_TYPE]:-}'" "$vm_name"; return 1 ;;
+    esac
+    case "${_vcv_vm[NETWORK_MODEL]:-}" in
+        virtio-net-pci|e1000) ;;
+        *) log_message "ERROR" "Invalid NETWORK_MODEL: '${_vcv_vm[NETWORK_MODEL]:-}'" "$vm_name"; return 1 ;;
+    esac
+    case "${_vcv_vm[DISK_INTERFACE]:-}" in
+        virtio|nvme|ide|sata) ;;
+        *) log_message "ERROR" "Invalid DISK_INTERFACE: '${_vcv_vm[DISK_INTERFACE]:-}'" "$vm_name"; return 1 ;;
+    esac
+    case "${_vcv_vm[DISK_CACHE]:-}" in
+        none|writeback|writethrough|directsync|unsafe) ;;
+        *) log_message "ERROR" "Invalid DISK_CACHE: '${_vcv_vm[DISK_CACHE]:-}'" "$vm_name"; return 1 ;;
+    esac
+    case "${_vcv_vm[DISK_IO]:-}" in
+        threads|native|io_uring) ;;
+        *) log_message "ERROR" "Invalid DISK_IO: '${_vcv_vm[DISK_IO]:-}'" "$vm_name"; return 1 ;;
+    esac
+    case "${_vcv_vm[DISK_DISCARD]:-}" in
+        ignore|unmap) ;;
+        *) log_message "ERROR" "Invalid DISK_DISCARD: '${_vcv_vm[DISK_DISCARD]:-}'" "$vm_name"; return 1 ;;
+    esac
+
+    [[ "${_vcv_vm[CPU_TYPE]:-}" =~ ^[A-Za-z0-9_.+-]+$ ]] || {
+        log_message "ERROR" "Invalid CPU_TYPE: '${_vcv_vm[CPU_TYPE]:-}'" "$vm_name"; return 1; }
+    [[ "${_vcv_vm[MACHINE_TYPE]:-}" =~ ^[A-Za-z0-9_.+-]+$ ]] || {
+        log_message "ERROR" "Invalid MACHINE_TYPE: '${_vcv_vm[MACHINE_TYPE]:-}'" "$vm_name"; return 1; }
+    [[ "${_vcv_vm[MACHINE_OPTIONS]:-}" =~ ^accel=(kvm|tcg)$ ]] || {
+        log_message "ERROR" "Invalid MACHINE_OPTIONS: '${_vcv_vm[MACHINE_OPTIONS]:-}'" "$vm_name"; return 1; }
+    [[ "${_vcv_vm[MAC_ADDRESS]:-}" =~ ^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$ ]] || {
+        log_message "ERROR" "Invalid MAC_ADDRESS: '${_vcv_vm[MAC_ADDRESS]:-}'" "$vm_name"; return 1; }
+    if [[ -n "${_vcv_vm[BRIDGE_NAME]:-}" ]]; then
+        [[ "${_vcv_vm[BRIDGE_NAME]}" =~ ^[A-Za-z0-9_.-]{1,15}$ ]] || {
+            log_message "ERROR" "Invalid BRIDGE_NAME: '${_vcv_vm[BRIDGE_NAME]}'" "$vm_name"; return 1; }
+    fi
+
+    if [[ -n "${_vcv_vm[DISK_DEV]:-}" ]]; then
+        [[ "${_vcv_vm[DISK_DEV]}" =~ ^/dev/[A-Za-z0-9_./@+-]+$ ]] || {
+            log_message "ERROR" "Invalid DISK_DEV: '${_vcv_vm[DISK_DEV]}'" "$vm_name"; return 1; }
+    else
+        [[ "${_vcv_vm[DISK_SIZE]:-}" =~ ^[0-9]+[GMgm]$ ]] || {
+            log_message "ERROR" "Invalid DISK_SIZE: '${_vcv_vm[DISK_SIZE]:-}'" "$vm_name"; return 1; }
+    fi
+
+    for key in ENABLE_VIRTIO MEMORY_PREALLOC MEMORY_SHARE ENABLE_AUDIO ENABLE_TPM SPICE_ENABLED ENABLE_UEFI LOCKED; do
+        value="${_vcv_vm[$key]:-}"
+        [[ "$value" =~ ^[01]$ ]] || {
+            log_message "ERROR" "Invalid $key: '$value' (must be 0 or 1)" "$vm_name"; return 1; }
+    done
+
+    [[ "${_vcv_vm[VRAM_SIZE_MB]:-}" =~ ^[0-9]+$ && "${_vcv_vm[VRAM_SIZE_MB]}" -ge 16 && "${_vcv_vm[VRAM_SIZE_MB]}" -le 512 ]] || {
+        log_message "ERROR" "Invalid VRAM_SIZE_MB: '${_vcv_vm[VRAM_SIZE_MB]:-}' (must be 16-512)" "$vm_name"; return 1; }
+    [[ "${_vcv_vm[SPICE_PORT]:-}" =~ ^[0-9]+$ && "${_vcv_vm[SPICE_PORT]}" -ge 1 && "${_vcv_vm[SPICE_PORT]}" -le 65535 ]] || {
+        log_message "ERROR" "Invalid SPICE_PORT: '${_vcv_vm[SPICE_PORT]:-}'" "$vm_name"; return 1; }
+
+    case "${_vcv_vm[SHARE_BACKEND]:-auto}" in
+        auto|virtfs|smb|virtiofs) ;;
+        *) log_message "ERROR" "Invalid SHARE_BACKEND: '${_vcv_vm[SHARE_BACKEND]:-}'" "$vm_name"; return 1 ;;
+    esac
+
+    base_video="${_vcv_vm[VIDEO_TYPE]%%,*}"
+    case "$base_video" in
+        qxl|qxl-vga|virtio-vga|virtio-gpu|std|vmware) ;;
+        *) log_message "ERROR" "Invalid VIDEO_TYPE: '${_vcv_vm[VIDEO_TYPE]:-}'" "$vm_name"; return 1 ;;
+    esac
+
+    if [[ -n "${_vcv_vm[AUDIO_PASSTHROUGH_PCI]:-}" && "${_vcv_vm[AUDIO_PASSTHROUGH_PCI]}" != "0" ]]; then
+        [[ "${_vcv_vm[AUDIO_PASSTHROUGH_PCI]}" =~ ^([0-9a-fA-F]{4}:)?[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7]$ ]] || {
+            log_message "ERROR" "Invalid AUDIO_PASSTHROUGH_PCI: '${_vcv_vm[AUDIO_PASSTHROUGH_PCI]}'" "$vm_name"; return 1; }
+    fi
+
+    if [[ -n "${_vcv_vm[PORT_FORWARDS]:-}" ]]; then
+        local ports=() port normalized
+        split_list "${_vcv_vm[PORT_FORWARDS]}" ports
+        for port in "${ports[@]}"; do
+            parse_port_spec "$port" "$vm_name" normalized >/dev/null || return 1
+        done
+    fi
+
+    if [[ -n "${_vcv_vm[USB_DEVICES]:-}" ]]; then
+        local usbs=() usb
+        split_list "${_vcv_vm[USB_DEVICES]}" usbs
+        for usb in "${usbs[@]}"; do
+            [[ "$usb" =~ ^[0-9a-fA-F]{4}:[0-9a-fA-F]{4}$ ]] || {
+                log_message "ERROR" "Invalid USB_DEVICES entry: '$usb'" "$vm_name"; return 1; }
+        done
+    fi
+
+    if [[ -n "${_vcv_vm[SHARED_FOLDERS]:-}" ]]; then
+        local shares=() share tag path
+        split_list "${_vcv_vm[SHARED_FOLDERS]}" shares
+        for share in "${shares[@]}"; do
+            [[ "$share" == *:* ]] || { log_message "ERROR" "Invalid SHARED_FOLDERS entry: '$share'" "$vm_name"; return 1; }
+            tag="${share%%:*}"; path="${share#*:}"
+            [[ "$tag" =~ ^[A-Za-z0-9_.-]+$ && "$path" =~ ^/[^,[:cntrl:]]+$ ]] || {
+                log_message "ERROR" "Invalid shared folder entry: '$share'" "$vm_name"; return 1; }
+        done
+    fi
+
+    return 0
+}
+
 load_vm_config() {
     local vm_name="$1"
     local -n _lvc_vm="$2"
+    validate_vm_name "$vm_name" >/dev/null 2>&1 || return 1
     local config_file="$VM_DIR/$vm_name/config"
 
     [[ ! -f "$config_file" ]] && {
@@ -255,10 +446,10 @@ load_vm_config() {
     read -r owner perms < <(stat -c "%U %a" "$config_file")
     [[ "$owner" != "$USER" ]] && {
         log_message "ERROR" "Security: config not owned by $USER" "$vm_name"; return 1; }
-    [[ "$perms" =~ [2367]$ ]] && {
-        log_message "WARNING" "Config is world-writable. Hardening to 600." "$vm_name"
+    if [[ "$perms" != "600" ]]; then
+        log_message "WARNING" "Config permissions are $perms. Hardening to 600." "$vm_name"
         chmod 600 "$config_file"
-    }
+    fi
 
     local -A allowed=()
     local k; for k in "${CONFIG_KEYS[@]}"; do allowed[$k]=1; done
@@ -277,7 +468,9 @@ load_vm_config() {
         if [[ "$line" =~ ^([A-Z_][A-Z0-9_]*)=(.*)$ ]]; then
             _key="${BASH_REMATCH[1]}"
             _val="${BASH_REMATCH[2]}"
-            if [[ "$_val" =~ ^\"(.*)\"$ ]] || [[ "$_val" =~ ^\'(.*)\'$ ]]; then
+            if [[ "$_val" =~ ^\"(.*)\"$ ]]; then
+                _val=$(unquote_config_value "${BASH_REMATCH[1]}")
+            elif [[ "$_val" =~ ^\'(.*)\'$ ]]; then
                 _val="${BASH_REMATCH[1]}"
             fi
             if [[ -n "${allowed[$_key]:-}" ]]; then
@@ -301,27 +494,45 @@ load_vm_config() {
         fi
     done
 
+    validate_vm_config_values "$vm_name" _lvc_vm || {
+        release_flock _fd "$config_file.lock"
+        return 1
+    }
+
     release_flock _fd "$config_file.lock"
 }
 
 save_vm_config() {
     local vm_name="$1"
     local -n _svc_vm="$2"
+    validate_vm_name "$vm_name" >/dev/null 2>&1 || return 1
     local config_file="$VM_DIR/$vm_name/config"
 
     local _fd
     acquire_flock "$config_file.lock" _fd || {
         log_message "ERROR" "Cannot lock config for: $vm_name" "$vm_name"; return 1; }
 
+    validate_vm_config_values "$vm_name" _svc_vm || {
+        release_flock _fd "$config_file.lock"
+        return 1
+    }
+
     local tmp
     tmp="$(mktemp "$config_file.XXXXXX")"
-    local key
+    local key value quoted
     for key in "${CONFIG_KEYS[@]}"; do
         case "$key" in
-            MAC_ADDRESS) printf '%s="%s"\n' "$key" "${_svc_vm[$key]:-$(generate_mac_address "$vm_name")}" ;;
-            MACHINE_OPTIONS) printf '%s="%s"\n' "$key" "${_svc_vm[$key]:-accel=kvm}" ;;
-            *)           printf '%s="%s"\n' "$key" "${_svc_vm[$key]:-}" ;;
+            MAC_ADDRESS) value="${_svc_vm[$key]:-$(generate_mac_address "$vm_name")}" ;;
+            MACHINE_OPTIONS) value="${_svc_vm[$key]:-accel=kvm}" ;;
+            *) value="${_svc_vm[$key]:-}" ;;
         esac
+        quoted=$(quote_config_value "$value") || {
+            rm -f "$tmp"
+            release_flock _fd "$config_file.lock"
+            log_message "ERROR" "Cannot serialize config value containing a newline: $key" "$vm_name"
+            return 1
+        }
+        printf '%s=%s\n' "$key" "$quoted"
     done > "$tmp"
     chmod 600 "$tmp"
     mv "$tmp" "$config_file"
@@ -345,11 +556,17 @@ check_vm_dependencies() {
         command -v swtpm_setup >/dev/null || missing+=("swtpm_setup (swtpm-tools)")
     fi
 
+    local shares=()
+    split_list "${_deps_vm[SHARED_FOLDERS]:-}" shares
     local backend
     backend=$(resolve_share_backend _deps_vm)
-    if [[ "$backend" == "virtiofs" ]]; then
+    if [[ ${#shares[@]} -gt 0 && "$backend" == "virtiofs" ]]; then
         have_virtiofsd || missing+=("virtiofsd")
-    elif [[ "$backend" == "smb" ]]; then
+    elif [[ ${#shares[@]} -gt 0 && "$backend" == "smb" ]]; then
+        case "${_deps_vm[NETWORK_TYPE]:-user}" in
+            user|nat) ;;
+            *) log_message "ERROR" "SMB shares require NETWORK_TYPE=user or nat." "$vm_name"; return 1 ;;
+        esac
         command -v smbd >/dev/null || missing+=("smbd (samba)")
     fi
 
@@ -371,7 +588,9 @@ check_vm_dependencies() {
 setup_tap_interface() {
     local vm_name="$1"
     local -n _sti_vm="$2"
-    local tap_name="qtap-${vm_name:0:10}"
+    local tap_hash
+    read -r tap_hash _ < <(echo -n "$vm_name" | md5sum)
+    local tap_name="qtap-${vm_name:0:6}-${tap_hash:0:5}"
     local bridge="${_sti_vm[BRIDGE_NAME]:-}"
 
     if [[ ! -r /dev/net/tun || ! -w /dev/net/tun ]]; then
@@ -405,7 +624,10 @@ setup_tap_interface() {
 
 teardown_tap_interface() {
     local vm_name="$1"
-    local tap_name="qtap-${vm_name:0:10}"
+    validate_vm_name "$vm_name" >/dev/null 2>&1 || return 1
+    local tap_hash
+    read -r tap_hash _ < <(echo -n "$vm_name" | md5sum)
+    local tap_name="qtap-${vm_name:0:6}-${tap_hash:0:5}"
     if ip link show "$tap_name" &>/dev/null; then
         ip link set "$tap_name" down       2>/dev/null || true
         ip tuntap del dev "$tap_name" mode tap 2>/dev/null || true
@@ -413,16 +635,49 @@ teardown_tap_interface() {
     fi
 }
 
+valid_ipv4() {
+    local ip="$1"
+    [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+    local IFS='.' octets=() octet
+    read -ra octets <<< "$ip"
+    for octet in "${octets[@]}"; do
+        [[ "$octet" =~ ^[0-9]+$ && "$octet" -ge 0 && "$octet" -le 255 ]] || return 1
+    done
+}
+
+valid_port() {
+    [[ "$1" =~ ^[0-9]+$ && "$1" -ge 1 && "$1" -le 65535 ]]
+}
+
+host_port_in_use() {
+    local host_port="$1" proto="$2"
+    command -v ss >/dev/null 2>&1 || return 1
+
+    local line
+    while IFS= read -r line; do
+        [[ "$line" =~ (^|[[:space:]])[^[:space:]]*[:.]${host_port}[[:space:]] ]] && return 0
+    done < <(ss -H -l${proto:0:1}n 2>/dev/null || true)
+    return 1
+}
+
 parse_port_spec() {
     local port_spec="$1" vm_name="$2"
-    local -n out_spec="$3"
+    local output_var="$3"
     if [[ "$port_spec" =~ ^(([0-9\.]+):)?([0-9]+):([0-9]+)(:(tcp|udp))?$ ]]; then
         local ip="${BASH_REMATCH[2]:-}"
         local host_port="${BASH_REMATCH[3]}"
         local guest_port="${BASH_REMATCH[4]}"
         local proto="${BASH_REMATCH[6]:-tcp}"
-        if [[ -n "$ip" ]]; then out_spec="${ip}:${host_port}:${guest_port}:${proto}"
-        else                    out_spec="${host_port}:${guest_port}:${proto}"
+        if [[ -n "$ip" ]] && ! valid_ipv4 "$ip"; then
+            log_message "ERROR" "Invalid host IP in port rule: '$port_spec'" "$vm_name"
+            return 1
+        fi
+        valid_port "$host_port" || {
+            log_message "ERROR" "Invalid host port in port rule: '$port_spec'" "$vm_name"; return 1; }
+        valid_port "$guest_port" || {
+            log_message "ERROR" "Invalid guest port in port rule: '$port_spec'" "$vm_name"; return 1; }
+        if [[ -n "$ip" ]]; then printf -v "$output_var" '%s' "${ip}:${host_port}:${guest_port}:${proto}"
+        else                    printf -v "$output_var" '%s' "${host_port}:${guest_port}:${proto}"
         fi
         return 0
     fi
@@ -493,6 +748,7 @@ get_group_devices() {
 
 save_original_drivers() {
     local vm_name="$1" pci_id="$2"
+    validate_vm_name "$vm_name" >/dev/null 2>&1 || return 1
     # Store in the VM directory rather than /tmp to prevent symlink/TOCTOU attacks
     # on a world-writable directory.
     local state_file="$VM_DIR/$vm_name/driver_state"
@@ -515,6 +771,7 @@ save_original_drivers() {
 
 restore_group_drivers() {
     local vm_name="$1"
+    validate_vm_name "$vm_name" >/dev/null 2>&1 || return 1
     local state_file="$VM_DIR/$vm_name/driver_state"
     [[ ! -f "$state_file" ]] && return 0
 
@@ -633,6 +890,8 @@ resolve_share_backend() {
     local shares=()
     split_list "${_rsb_vm[SHARED_FOLDERS]:-}" shares
     local share_count="${#shares[@]}"
+
+    [[ "$share_count" -eq 0 ]] && { echo "none"; return; }
 
     if [[ "$backend" != "auto" ]]; then
         if [[ "$backend" == "smb" && "$share_count" -gt 1 ]]; then
@@ -781,14 +1040,18 @@ start_virtiofsd_daemons() {
 
 stop_virtiofsd_daemons() {
     local vm_name="$1" pid_file pid
+    validate_vm_name "$vm_name" >/dev/null 2>&1 || return 1
 
     for pid_file in "$VM_DIR/$vm_name"/virtiofsd_*.pid; do
         [[ -e "$pid_file" ]] || continue
         read -r pid < "$pid_file"
-        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+        local tag="${pid_file##*/virtiofsd_}"
+        tag="${tag%.pid}"
+        local socket="$VM_DIR/$vm_name/sockets/virtiofsd_${tag}.sock"
+        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null && pid_cmdline_contains "$pid" "--socket-path=$socket"; then
             kill "$pid" 2>/dev/null
             sleep 0.5
-            kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true
+            kill -0 "$pid" 2>/dev/null && pid_cmdline_contains "$pid" "--socket-path=$socket" && kill -9 "$pid" 2>/dev/null || true
         fi
         rm -f "$pid_file"
     done
@@ -859,9 +1122,14 @@ configure_uefi() {
 
 stop_tpm() {
     local vm_name="$1"
+    validate_vm_name "$vm_name" >/dev/null 2>&1 || return 1
     local tpm_pid="$VM_DIR/$vm_name/swtpm.pid"
     [[ -f "$tpm_pid" ]] || return 0
-    kill "$(< "$tpm_pid")" 2>/dev/null || true
+    local pid
+    pid="$(< "$tpm_pid")"
+    if pid_cmdline_contains "$pid" "path=$VM_DIR/$vm_name/sockets/swtpm.sock"; then
+        kill "$pid" 2>/dev/null || true
+    fi
     rm -f "$tpm_pid"
 }
 
@@ -874,8 +1142,12 @@ configure_cpu() {
     local -n _cpu_cmd="$2"
 
     if [[ "${_cpu_vm[OS_TYPE]:-linux}" == "windows" ]]; then
-        local smp_cores=$(( _cpu_vm[CORES] / 2 ))
-        (( smp_cores < 1 )) && smp_cores=1
+        local smp_topology
+        if (( _cpu_vm[CORES] >= 2 && _cpu_vm[CORES] % 2 == 0 )); then
+            smp_topology="${_cpu_vm[CORES]},cores=$(( _cpu_vm[CORES] / 2 )),threads=2,sockets=1"
+        else
+            smp_topology="${_cpu_vm[CORES]},cores=${_cpu_vm[CORES]},threads=1,sockets=1"
+        fi
 
         local hv_flags="hv-relaxed,hv-vapic,hv-spinlocks=0x1fff,hv-time"
         hv_flags+=",hv-vpindex,hv-synic,hv-stimer,hv-stimer-direct,hv-reset"
@@ -883,7 +1155,7 @@ configure_cpu() {
         hv_flags+=",kvm=off,l3-cache=on,+topoext"
 
         _cpu_cmd+=(
-            "-smp"    "${_cpu_vm[CORES]},cores=${smp_cores},threads=2,sockets=1"
+            "-smp"    "$smp_topology"
             "-cpu"    "${_cpu_vm[CPU_TYPE]},${hv_flags}"
             "-global" "kvm-pit.lost_tick_policy=delay"
             "-rtc"    "base=localtime,clock=host,driftfix=slew"
@@ -1054,7 +1326,17 @@ configure_network() {
                 local fwd
                 for fwd in "${fwds[@]}"; do
                     if [[ "$fwd" =~ ^(([0-9\.]+):)?([0-9]+):([0-9]+):(tcp|udp)$ ]]; then
-                        netdev_opts+=",hostfwd=${BASH_REMATCH[5]}:${BASH_REMATCH[2]:-}:${BASH_REMATCH[3]}-:${BASH_REMATCH[4]}"
+                        # Capture the global array into local variables immediately
+                        local fwd_ip="${BASH_REMATCH[2]:-}"
+                        local fwd_hport="${BASH_REMATCH[3]}"
+                        local fwd_gport="${BASH_REMATCH[4]}"
+                        local fwd_proto="${BASH_REMATCH[5]}"
+
+                        if host_port_in_use "$fwd_hport" "$fwd_proto"; then
+                            log_message "ERROR" "Host port already in use: ${fwd_hport}/${fwd_proto}" "$vm_name"
+                            return 1
+                        fi
+                        netdev_opts+=",hostfwd=${fwd_proto}:${fwd_ip}:${fwd_hport}-:${fwd_gport}"
                     fi
                 done
             fi
@@ -1071,7 +1353,21 @@ configure_network() {
                 local fwd
                 for fwd in "${fwds[@]}"; do
                     if [[ "$fwd" =~ ^(([0-9\.]+):)?([0-9]+):([0-9]+):(tcp|udp)$ ]]; then
-                        passt_opts+=",hostfwd=${BASH_REMATCH[5]}::${BASH_REMATCH[3]}-:${BASH_REMATCH[4]}"
+                        # Capture the global array into local variables immediately
+                        local fwd_ip="${BASH_REMATCH[2]:-}"
+                        local fwd_hport="${BASH_REMATCH[3]}"
+                        local fwd_gport="${BASH_REMATCH[4]}"
+                        local fwd_proto="${BASH_REMATCH[5]}"
+
+                        if host_port_in_use "$fwd_hport" "$fwd_proto"; then
+                            log_message "ERROR" "Host port already in use: ${fwd_hport}/${fwd_proto}" "$vm_name"
+                            return 1
+                        fi
+                        if [[ -n "$fwd_ip" ]]; then
+                            passt_opts+=",hostfwd=${fwd_proto}:${fwd_ip}:${fwd_hport}-:${fwd_gport}"
+                        else
+                            passt_opts+=",hostfwd=${fwd_proto}::${fwd_hport}-:${fwd_gport}"
+                        fi
                     fi
                 done
             fi
@@ -1265,7 +1561,8 @@ configure_shares_virtiofs() {
     for s in "${shares[@]}"; do
         tag="${s%%:*}"; sock="$socket_dir/virtiofsd_${tag}.sock"
         if [[ ! -S "$sock" ]]; then
-            log_message "WARNING" "virtiofsd socket missing for share: $tag" "$vm_name"; continue
+            log_message "ERROR" "virtiofsd socket missing for share: $tag" "$vm_name"
+            return 1
         fi
         _cvf_cmd+=("-chardev" "socket,id=char_${tag},path=${sock}" "-device" "vhost-user-fs-pci,chardev=char_${tag},tag=${tag}")
         log_message "INFO" "VirtIO-FS: '$tag'" "$vm_name"
@@ -1290,6 +1587,8 @@ configure_shares() {
             configure_shares_virtfs "$vm_name" _cs_vm _cs_cmd ;;
         smb)
             log_message "INFO" "Shares: SMB (single share via SLiRP)" "$vm_name" ;;
+        none)
+            return 0 ;;
         *)
             log_message "WARNING" "Unknown share backend '$backend', falling back to virtfs" "$vm_name"
             configure_shares_virtfs "$vm_name" _cs_vm _cs_cmd ;;
@@ -1302,7 +1601,7 @@ configure_tpm() {
     local -n _tpm_cmd="$3"
 
     [[ "${_tpm_vm[ENABLE_TPM]:-0}" != "1" ]] && return 0
-    command -v swtpm &>/dev/null || { log_message "WARNING" "swtpm not found — TPM disabled." "$vm_name"; return 0; }
+    command -v swtpm &>/dev/null || { log_message "ERROR" "swtpm not found; TPM is required for this VM." "$vm_name"; return 1; }
 
     local tpm_dir="$VM_DIR/$vm_name/tpm"
     local tpm_sock="$VM_DIR/$vm_name/sockets/swtpm.sock"
@@ -1312,18 +1611,29 @@ configure_tpm() {
     if [[ ! -f "$tpm_dir/tpm2-00.permall" ]]; then
         swtpm_setup --tpm2 --tpmstate "$tpm_dir" --createek --allow-signing \
             --decryption --create-ek-cert --create-platform-cert \
-            --lock-nvram --not-overwrite &>/dev/null || true
+            --lock-nvram --not-overwrite &>/dev/null || {
+                log_message "ERROR" "Failed to initialise TPM state" "$vm_name"
+                return 1
+            }
     fi
 
+    rm -f "$tpm_sock"
     swtpm socket --tpm2 --tpmstate "dir=$tpm_dir" --ctrl "type=unixio,path=$tpm_sock" \
-        --daemon --pid "file=$tpm_pid" --log "level=0" || true
+        --daemon --pid "file=$tpm_pid" --log "level=0" || {
+            log_message "ERROR" "Failed to start swtpm" "$vm_name"
+            return 1
+        }
 
     local i
     for (( i=0; i<20; i++ )); do
         [[ -S "$tpm_sock" ]] && break; sleep 0.2
     done
 
-    [[ ! -S "$tpm_sock" ]] && { log_message "WARNING" "swtpm failed to start" "$vm_name"; return 0; }
+    [[ ! -S "$tpm_sock" ]] && {
+        log_message "ERROR" "swtpm failed to create its control socket" "$vm_name"
+        stop_tpm "$vm_name"
+        return 1
+    }
 
     _tpm_cmd+=("-chardev" "socket,id=chrtpm,path=$tpm_sock" "-tpmdev" "emulator,id=tpm0,chardev=chrtpm" "-device" "tpm-crb,tpmdev=tpm0")
     log_message "INFO" "TPM 2.0 enabled" "$vm_name"
@@ -1340,12 +1650,13 @@ create() {
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --os-type)       os_type="$2";       shift 2 ;;
-            --memory)        memory="$2";         shift 2 ;;
-            --cores)         cores="$2";          shift 2 ;;
-            --disk-size)     disk_size="$2";      shift 2 ;;
-            --disk-dev)      disk_dev="$2";        shift 2 ;;
+            --os-type)       [[ $# -ge 2 && "$2" != --* ]] || { log_message "ERROR" "--os-type requires a value"; return 1; }; os_type="$2";       shift 2 ;;
+            --memory)        [[ $# -ge 2 && "$2" != --* ]] || { log_message "ERROR" "--memory requires a value"; return 1; }; memory="$2";         shift 2 ;;
+            --cores)         [[ $# -ge 2 && "$2" != --* ]] || { log_message "ERROR" "--cores requires a value"; return 1; }; cores="$2";          shift 2 ;;
+            --disk-size)     [[ $# -ge 2 && "$2" != --* ]] || { log_message "ERROR" "--disk-size requires a value"; return 1; }; disk_size="$2";      shift 2 ;;
+            --disk-dev)      [[ $# -ge 2 && "$2" != --* ]] || { log_message "ERROR" "--disk-dev requires a value"; return 1; }; disk_dev="$2";        shift 2 ;;
             --machine)
+                [[ $# -ge 2 && "$2" != --* ]] || { log_message "ERROR" "--machine requires a value"; return 1; }
                 [[ "$2" =~ ^([^,]+)(,(accel=kvm|accel=tcg))?$ ]] || {
                     log_message "ERROR" "Invalid machine: '$2'. Use e.g. q35,accel=kvm"; return 1; }
                 machine_type="${BASH_REMATCH[1]}"
@@ -1359,7 +1670,7 @@ create() {
             --no-uefi)       enable_uefi="0";     shift ;;
             --spice)         spice_enabled="1";   shift ;;
             --no-spice)      spice_enabled="0";   shift ;;
-            --share-backend) share_backend="$2";  shift 2 ;;
+            --share-backend) [[ $# -ge 2 && "$2" != --* ]] || { log_message "ERROR" "--share-backend requires a value"; return 1; }; share_backend="$2";  shift 2 ;;
             *) log_message "ERROR" "Unknown option: $1"; return 1 ;;
         esac
     done
@@ -1368,6 +1679,10 @@ create() {
     vm_exists "$vm_name" && { log_message "ERROR" "VM already exists: $vm_name"; return 1; }
     [[ "$os_type" != "linux" && "$os_type" != "windows" ]] && {
         log_message "ERROR" "Invalid os-type: '$os_type'. Use: linux, windows"; return 1; }
+    if [[ -n "$share_backend" && ! "$share_backend" =~ ^(auto|virtfs|smb|virtiofs)$ ]]; then
+        log_message "ERROR" "Invalid share backend: '$share_backend'. Use: auto, virtfs, smb, virtiofs"
+        return 1
+    fi
 
     if [[ -n "$cores" ]]; then
         [[ ! "$cores" =~ ^[0-9]+$ || "$cores" -lt 1 || "$cores" -gt 64 ]] && {
@@ -1427,14 +1742,17 @@ create() {
     VM[NAME]="$vm_name"
     VM[OS_TYPE]="$os_type"
     VM[MAC_ADDRESS]=$(generate_mac_address "$vm_name")
+    VM[MACHINE_OPTIONS]="${VM[MACHINE_OPTIONS]:-accel=kvm}"
     VM[LOCKED]="0"
     VM[PORT_FORWARDS]=""
     VM[USB_DEVICES]=""
     VM[SHARED_FOLDERS]=""
     VM[DISK_DEV]=""
 
-    mkdir -p -m 700 "$VM_DIR/$vm_name"/{logs,sockets,tpm} || {
+    mkdir -p "$VM_DIR/$vm_name" "$VM_DIR/$vm_name/logs" "$VM_DIR/$vm_name/sockets" "$VM_DIR/$vm_name/tpm" || {
         log_message "ERROR" "Failed to create VM directories" "$vm_name"; return 1; }
+    chmod 700 "$VM_DIR/$vm_name" "$VM_DIR/$vm_name/logs" "$VM_DIR/$vm_name/sockets" "$VM_DIR/$vm_name/tpm" || {
+        log_message "ERROR" "Failed to secure VM directories" "$vm_name"; return 1; }
 
     if [[ -n "$disk_dev" ]]; then
         # Physical block device — no image file is created
@@ -1475,23 +1793,25 @@ start() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --headless) headless="1"; shift ;;
-            --iso)      iso_file="$2"; shift 2 ;;
-            --virtio-iso) virtio_iso="$2"; shift 2 ;;
+            --iso)      [[ $# -ge 2 && "$2" != --* ]] || { log_message "ERROR" "--iso requires a path"; return 1; }; iso_file="$2"; shift 2 ;;
+            --virtio-iso) [[ $# -ge 2 && "$2" != --* ]] || { log_message "ERROR" "--virtio-iso requires a path"; return 1; }; virtio_iso="$2"; shift 2 ;;
             --debug)    debug="1"; shift ;;
             *) log_message "ERROR" "Unknown option: $1"; return 1 ;;
         esac
     done
 
+    require_vm "$vm_name" exists not-running || return 1
+
     QEMATE_ACTIVE_VM="$vm_name"
     QEMATE_PHASE="starting"
-    trap 'restore_group_drivers "$QEMATE_ACTIVE_VM"' EXIT
+    QEMATE_CLEANUP_DONE=0
+    trap cleanup_active_vm EXIT
 
     if ! vm_is_running "$vm_name"; then
         stop_virtiofsd_daemons "$vm_name"
         stop_tpm "$vm_name"
     fi
 
-    require_vm "$vm_name" exists not-running || return 1
     local -A VM=()
     load_vm_config "$vm_name" VM || return 1
     check_vm_dependencies "$vm_name" VM || return 1
@@ -1531,7 +1851,7 @@ start() {
     )
 
     configure_display VM qemu_cmd "$headless"
-    configure_disk "$vm_name" VM qemu_cmd
+    configure_disk "$vm_name" VM qemu_cmd || return 1
 
     if [[ -n "$iso_file" ]]; then
         iso_file=$(realpath "$iso_file")
@@ -1545,11 +1865,11 @@ start() {
         qemu_cmd+=("-drive" "file=${virtio_iso},format=raw,readonly=on,media=cdrom,id=cdrom1")
     fi
 
-    configure_audio "$vm_name" VM qemu_cmd
-    configure_usb_passthrough "$vm_name" VM qemu_cmd
+    configure_audio "$vm_name" VM qemu_cmd || return 1
+    configure_usb_passthrough "$vm_name" VM qemu_cmd || return 1
     configure_shares "$vm_name" VM qemu_cmd || { stop_virtiofsd_daemons "$vm_name"; return 1; }
-    configure_tpm "$vm_name" VM qemu_cmd
-    configure_network "$vm_name" VM qemu_cmd
+    configure_tpm "$vm_name" VM qemu_cmd || return 1
+    configure_network "$vm_name" VM qemu_cmd || return 1
 
     if [[ "$debug" == "1" ]]; then
         echo -e "\n[DEBUG] Generated QEMU command:\n${qemu_cmd[*]}\n" >&2
@@ -1566,11 +1886,10 @@ start() {
 
     log_message "INFO" "QEMU process terminated (exit: $qemu_status)" "$vm_name"
 
-    stop_virtiofsd_daemons "$vm_name"
-    stop_tpm "$vm_name"
-    teardown_tap_interface "$vm_name"
+    cleanup_active_vm
     rm -f "$VM_DIR/$vm_name/qemu.pid"
     release_flock _fd "$lockfile"
+    trap - EXIT
 
     if [[ $qemu_status -eq 0 ]]; then
         QEMATE_PHASE="stopped"
@@ -1596,21 +1915,21 @@ stop() {
     require_vm "$vm_name" exists running || return 1
     local pid
     read -r pid < "$VM_DIR/$vm_name/qemu.pid"
-    kill -0 "$pid" 2>/dev/null || { log_message "ERROR" "VM is not running"; return 1; }
+    vm_pid_matches "$vm_name" "$pid" || { log_message "ERROR" "VM process identity changed; refusing to signal it"; return 1; }
     log_message "INFO" "Stopping VM: $vm_name" "$vm_name"
 
     if [[ "$force" == "true" ]]; then
-        kill -9 "$pid" || true
+        vm_pid_matches "$vm_name" "$pid" && kill -9 "$pid" || true
     else
-        kill -15 "$pid" || true
+        vm_pid_matches "$vm_name" "$pid" && kill -15 "$pid" || true
         local i
         for (( i=0; i<30; i++ )); do
-            kill -0 "$pid" 2>/dev/null || break; sleep 1
+            vm_pid_matches "$vm_name" "$pid" || break; sleep 1
         done
-        kill -0 "$pid" 2>/dev/null && kill -9 "$pid" || true
+        vm_pid_matches "$vm_name" "$pid" && kill -9 "$pid" || true
     fi
 
-    rm -f "$VM_DIR/$vm_name/qemu.pid" "$VM_DIR/$vm_name/qemu.pid.lock"
+    [[ "$(< "$VM_DIR/$vm_name/qemu.pid" 2>/dev/null)" == "$pid" ]] && rm -f "$VM_DIR/$vm_name/qemu.pid"
     stop_virtiofsd_daemons "$vm_name"
     stop_tpm               "$vm_name"
     teardown_tap_interface "$vm_name"
@@ -1661,10 +1980,10 @@ resize_disk() {
         return 1
     fi
 
-    vm_is_running "$vm_name" && [[ "$force" != "true" ]] && {
-        log_message "ERROR" "VM is running. Use --force (requires online resize support)." "$vm_name"
+    if vm_is_running "$vm_name"; then
+        log_message "ERROR" "Cannot resize while VM is running. Stop the VM first; safe online resize requires QMP support, which is not implemented." "$vm_name"
         return 1
-    }
+    fi
 
     [[ ! "$new_size" =~ ^(\+)?[0-9]+[GMgm]$ ]] && {
         log_message "ERROR" "Invalid size: '$new_size'. Use e.g. 80G or +20G" "$vm_name"; return 1; }
@@ -1695,7 +2014,12 @@ configure() {
     backup="$(mktemp)"
     cp "$config_file" "$backup"
 
-    "${EDITOR:-nano}" "$config_file"
+    if ! "${EDITOR:-nano}" "$config_file"; then
+        log_message "ERROR" "Editor exited with an error. Restoring previous config." "$vm_name"
+        cp "$backup" "$config_file"
+        rm -f "$backup"
+        return 1
+    fi
 
     local -A _vtmp=()
     if ! load_vm_config "$vm_name" _vtmp 2>/dev/null; then
@@ -1825,7 +2149,7 @@ VM
   start   <name> [--headless] [--iso PATH] [--virtio-iso PATH] [--debug]
   stop    <name> [--force]
   delete  <name> [--force]
-  resize  <name> <SIZE|+SIZE> [--force]   --force allows resize while VM is running
+  resize  <name> <SIZE|+SIZE> [--force]   VM must be stopped; --force is reserved
   list
   status  <name>
   config  <name>     edit VM config in \$EDITOR
@@ -1862,6 +2186,7 @@ main() {
     done
 
     mkdir -p "$VM_DIR"
+    chmod 700 "$VM_DIR"
     [[ $# -eq 0 ]] && { display_help; exit 0; }
 
     local cmd
@@ -1876,7 +2201,7 @@ main() {
         start)         [[ $# -eq 0 ]] && { echo "Error: VM name required"; exit 1; }; start       "$@" ;;
         stop)          [[ $# -eq 0 ]] && { echo "Error: VM name required"; exit 1; }; stop        "$@" ;;
         delete)        [[ $# -eq 0 ]] && { echo "Error: VM name required"; exit 1; }; delete      "$@" ;;
-        resize)        [[ $# -eq 0 ]] && { echo "Error: VM name required"; exit 1; }; resize_disk "$@" ;;
+        resize)        [[ $# -lt 2 ]] && { echo "Error: VM name and size required"; exit 1; }; resize_disk "$@" ;;
         status)        [[ $# -eq 0 ]] && { echo "Error: VM name required"; exit 1; }; status      "$@" ;;
         configure|config) [[ $# -eq 0 ]] && { echo "Error: VM name required"; exit 1; }; configure   "$@" ;;
         list)          list ;;
