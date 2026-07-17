@@ -17,12 +17,12 @@ done
 
 # Check dependencies
 if ! command -v qemu-system-x86_64 &> /dev/null; then
-    echo "Error: qemu-system-x86_64 not found. Please install QEMU version 9.0 or higher."
+    echo "Error: qemu-system-x86_64 not found. Please install QEMU version 10.0 or higher."
     exit 1
 fi
 
 if ! command -v qemu-img &> /dev/null; then
-    echo "Error: qemu-img not found. Please install QEMU version 9.0 or higher."
+    echo "Error: qemu-img not found. Please install QEMU version 10.0 or higher."
     exit 1
 fi
 
@@ -31,16 +31,24 @@ if ! command -v flock &> /dev/null; then
     exit 1
 fi
 
+if ! command -v nc &> /dev/null || ! nc -h 2>&1 | grep -q -- '-U'; then
+    echo "Error: OpenBSD netcat with Unix-socket support (nc -U) is required for graceful VM control."
+    exit 1
+fi
+
 if [[ "${BASH_VERSION%%.*}" -lt 5 ]]; then
     echo "Error: Bash 5.0 or higher is required. Current version: $BASH_VERSION"
     exit 1
 fi
 
-qemu_major=$(qemu-system-x86_64 --version 2> /dev/null | grep -oE '[0-9]+' | head -1 || true)
-if [[ -z "$qemu_major" || "$qemu_major" -lt 9 ]]; then
-    echo "Error: QEMU 9.0 or higher is required. Please upgrade QEMU."
-    exit 1
-fi
+for qemu_command in qemu-system-x86_64 qemu-img; do
+    qemu_version_output=$("$qemu_command" --version 2>/dev/null || true)
+    if [[ ! "$qemu_version_output" =~ version[[:space:]]+([0-9]+)(\.[0-9]+)? ]] ||
+       (( BASH_REMATCH[1] < 10 )); then
+        echo "Error: $qemu_command from QEMU 10.0 or higher is required. Please upgrade QEMU."
+        exit 1
+    fi
+done
 
 # Default installation paths
 PREFIX="${PREFIX:-/usr/local}"

@@ -2,7 +2,7 @@
 # =============================================================================
 # qemate — Streamlined QEMU Virtual Machine Management Utility
 #
-# VERSION:  4.2.3
+# VERSION:  4.3.0
 # LICENSE:  MIT
 # =============================================================================
 
@@ -21,9 +21,12 @@ umask 0077
 # CONSTANTS & DEFAULTS
 # =============================================================================
 
-readonly VERSION="4.2.3"
+readonly VERSION="4.3.0"
+readonly MIN_QEMU_MAJOR=10
+readonly MIN_QEMU_VERSION="10.0"
 readonly VM_DIR="${QEMATE_VM_DIR:-$HOME/QVMs}"
 readonly LOG_LEVEL="${LOG_LEVEL:-INFO}"
+readonly DEFAULT_STOP_TIMEOUT=60
 
 # Shared defaults for all OS types.
 declare -A _BASE_DEFAULTS=(
@@ -50,6 +53,9 @@ declare -A _BASE_DEFAULTS=(
     [SPICE_PORT]=5930
     [SHARE_BACKEND]=auto
     [ENABLE_UEFI]=0
+    [PERFORMANCE_PROFILE]=balanced
+    [HIDE_KVM]=0
+    [CPU_AFFINITY]=""
 )
 
 # Per-OS overrides — only keys that differ from _BASE_DEFAULTS.
@@ -68,6 +74,9 @@ declare -A _OS_OVERRIDES_windows=(
 declare -g QEMATE_ACTIVE_VM=""
 declare -g QEMATE_PHASE=""
 declare -g QEMATE_CLEANUP_DONE=0
+declare -g QEMATE_LOCK_FD=""
+declare -g QEMATE_LOCK_FILE=""
+declare -g QEMATE_SUPPRESS_FILE_LOG=0
 
 vm_pid_matches() {
     local vm_name="$1" pid="$2"
@@ -97,23 +106,29 @@ pid_cmdline_contains() {
 }
 
 cleanup_active_vm() {
-    [[ "$QEMATE_CLEANUP_DONE" -eq 0 ]] || return 0
-    [[ -n "$QEMATE_ACTIVE_VM" && "$QEMATE_PHASE" =~ ^(starting|running)$ ]] || return 0
-    QEMATE_CLEANUP_DONE=1
+    if [[ "$QEMATE_CLEANUP_DONE" -eq 0 && -n "$QEMATE_ACTIVE_VM" && "$QEMATE_PHASE" =~ ^(starting|running)$ ]]; then
+        QEMATE_CLEANUP_DONE=1
 
-    log_message "DEBUG" "Cleaning up: $QEMATE_ACTIVE_VM"
-    local pidfile="$VM_DIR/$QEMATE_ACTIVE_VM/qemu.pid" pid=""
-    if [[ -f "$pidfile" ]]; then
-        read -r pid < "$pidfile" || true
-        if vm_pid_matches "$QEMATE_ACTIVE_VM" "$pid"; then
-            kill "$pid" 2>/dev/null || true
+        log_message "DEBUG" "Cleaning up: $QEMATE_ACTIVE_VM"
+        local pidfile="$VM_DIR/$QEMATE_ACTIVE_VM/qemu.pid" pid=""
+        if [[ -f "$pidfile" ]]; then
+            read -r pid < "$pidfile" || true
+            if vm_pid_matches "$QEMATE_ACTIVE_VM" "$pid"; then
+                kill "$pid" 2>/dev/null || true
+            fi
+            [[ "$(< "$pidfile")" == "$pid" ]] && rm -f "$pidfile"
         fi
-        [[ "$(< "$pidfile")" == "$pid" ]] && rm -f "$pidfile"
+        stop_virtiofsd_daemons "$QEMATE_ACTIVE_VM" 2>/dev/null || true
+        stop_tpm               "$QEMATE_ACTIVE_VM" 2>/dev/null || true
+        teardown_tap_interface "$QEMATE_ACTIVE_VM" 2>/dev/null || true
+        restore_group_drivers  "$QEMATE_ACTIVE_VM" 2>/dev/null || true
     fi
-    stop_virtiofsd_daemons  "$QEMATE_ACTIVE_VM" 2>/dev/null || true
-    stop_tpm                "$QEMATE_ACTIVE_VM" 2>/dev/null || true
-    teardown_tap_interface "$QEMATE_ACTIVE_VM" 2>/dev/null || true
-    restore_group_drivers   "$QEMATE_ACTIVE_VM" 2>/dev/null || true
+
+    if [[ -n "$QEMATE_LOCK_FD" ]]; then
+        flock -u "$QEMATE_LOCK_FD" 2>/dev/null || true
+        exec {QEMATE_LOCK_FD}>&-
+        QEMATE_LOCK_FILE=""
+    fi
 }
 
 # Clean up orphaned daemons and lock files when interrupted during launch.
@@ -145,7 +160,7 @@ log_message() {
 
     if (( msg_rank >= min_rank )); then
         echo "[${level}] ${message}"
-        if [[ -n "$vm_name" && -d "$VM_DIR/$vm_name/logs" ]]; then
+        if [[ "$QEMATE_SUPPRESS_FILE_LOG" != "1" && -n "$vm_name" && -d "$VM_DIR/$vm_name/logs" ]]; then
             local timestamp
             printf -v timestamp '%(%Y-%m-%d %H:%M:%S)T' -1
             echo "${timestamp} [${level}] ${message}" >> "$VM_DIR/$vm_name/logs/qemate.log"
@@ -225,6 +240,31 @@ acquire_flock() {
     flock -n "$_af_fd" || { exec {_af_fd}>&-; return 1; }
 }
 
+acquire_stopped_vm_lock() {
+    local vm_name="$1"
+    local -n _asvl_fd="$2"
+    local lockfile="$VM_DIR/$vm_name/qemu.pid.lock"
+    acquire_flock "$lockfile" _asvl_fd || {
+        log_message "ERROR" "VM lifecycle is busy (starting or running): $vm_name" "$vm_name"
+        return 1
+    }
+    if vm_is_running "$vm_name"; then
+        release_flock _asvl_fd "$lockfile"
+        log_message "ERROR" "VM is already running" "$vm_name"
+        return 1
+    fi
+}
+
+vm_lifecycle_busy() {
+    local vm_name="$1" _fd
+    local lockfile="$VM_DIR/$vm_name/qemu.pid.lock"
+    if acquire_flock "$lockfile" _fd; then
+        release_flock _fd "$lockfile"
+        return 1
+    fi
+    return 0
+}
+
 release_flock() {
     local -n _rf_fd="$1"
     local lockfile="$2"
@@ -245,6 +285,104 @@ split_list() {
         [[ -z "${_sl_out[i]}" ]] && unset '_sl_out[i]'
     done
     _sl_out=("${_sl_out[@]}") # Re-index
+}
+
+require_commands() {
+    local cmd missing=()
+    for cmd in "$@"; do
+        command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
+    done
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        log_message "ERROR" "Required command(s) not found: ${missing[*]}"
+        return 1
+    fi
+}
+
+qemu_major_version() {
+    local command_name="$1" version_output
+    version_output=$("$command_name" --version 2>/dev/null) || return 1
+    [[ "$version_output" =~ version[[:space:]]+([0-9]+)(\.[0-9]+)? ]] || return 1
+    printf '%s' "${BASH_REMATCH[1]}"
+}
+
+require_qemu_version() {
+    local command_name="$1" major
+    require_commands "$command_name" || return 1
+    major=$(qemu_major_version "$command_name") || {
+        log_message "ERROR" "Could not determine the $command_name version; QEMU ${MIN_QEMU_VERSION}+ is required"
+        return 1
+    }
+    if (( major < MIN_QEMU_MAJOR )); then
+        log_message "ERROR" "$command_name $major is unsupported; QEMU ${MIN_QEMU_VERSION}+ is required"
+        return 1
+    fi
+}
+
+size_to_mib() {
+    local size="$1"
+    local value="${size%[GMgm]}" unit="${size: -1}"
+    [[ "$value" =~ ^[0-9]+$ ]] || return 1
+    if [[ "${unit^^}" == "G" ]]; then printf '%s' "$(( value * 1024 ))"
+    else printf '%s' "$value"
+    fi
+}
+
+validate_performance_memory() {
+    local vm_name="$1" memory="$2" requested_mib available_mib=0 lock_kib
+    requested_mib=$(size_to_mib "$memory") || return 1
+    if [[ -r /proc/meminfo ]]; then
+        local key value _
+        while IFS=': ' read -r key value _; do
+            if [[ "$key" == "MemAvailable" ]]; then
+                available_mib=$(( value / 1024 ))
+                break
+            fi
+        done < /proc/meminfo
+    fi
+    if (( available_mib > 0 && requested_mib > available_mib * 90 / 100 )); then
+        log_message "ERROR" "Performance profile needs ${requested_mib} MiB locked RAM, but only ${available_mib} MiB is available" "$vm_name"
+        return 1
+    fi
+
+    lock_kib=$(ulimit -l)
+    if [[ "$lock_kib" != "unlimited" && "$lock_kib" =~ ^[0-9]+$ && "$lock_kib" -lt $(( requested_mib * 1024 )) ]]; then
+        log_message "ERROR" "memlock limit (${lock_kib} KiB) is below VM memory; raise ulimit -l or use the balanced profile" "$vm_name"
+        return 1
+    fi
+}
+
+have_unix_nc() {
+    command -v nc >/dev/null 2>&1 && nc -h 2>&1 | grep -q -- '-U'
+}
+
+qmp_command() {
+    local vm_name="$1" command="$2"
+    local socket="$VM_DIR/$vm_name/sockets/qmp.sock"
+    [[ -S "$socket" ]] || {
+        log_message "ERROR" "QMP control socket is unavailable for: $vm_name" "$vm_name"
+        return 1
+    }
+    have_unix_nc || {
+        log_message "ERROR" "OpenBSD netcat with Unix-socket support (nc -U) is required for VM control" "$vm_name"
+        return 1
+    }
+
+    local response
+    response=$(
+        {
+            printf '%s\n' '{"execute":"qmp_capabilities","id":"capabilities"}'
+            printf '{"execute":"%s","id":"command"}\n' "$command"
+            sleep 0.1
+        } | timeout 3 nc -U -N "$socket" 2>/dev/null
+    ) || {
+        log_message "ERROR" "QMP command failed: $command" "$vm_name"
+        return 1
+    }
+    [[ "$response" == *'"error"'* ]] && {
+        log_message "ERROR" "QMP rejected command '$command': $response" "$vm_name"
+        return 1
+    }
+    return 0
 }
 
 apply_os_defaults() {
@@ -275,6 +413,7 @@ readonly -a CONFIG_KEYS=(
     ENABLE_AUDIO AUDIO_PASSTHROUGH_PCI
     USB_DEVICES SHARED_FOLDERS SHARE_BACKEND
     ENABLE_TPM SPICE_ENABLED SPICE_PORT ENABLE_UEFI
+    PERFORMANCE_PROFILE HIDE_KVM CPU_AFFINITY
     LOCKED
 )
 
@@ -374,11 +513,23 @@ validate_vm_config_values() {
             log_message "ERROR" "Invalid DISK_SIZE: '${_vcv_vm[DISK_SIZE]:-}'" "$vm_name"; return 1; }
     fi
 
-    for key in ENABLE_VIRTIO MEMORY_PREALLOC MEMORY_SHARE ENABLE_AUDIO ENABLE_TPM SPICE_ENABLED ENABLE_UEFI LOCKED; do
+    for key in ENABLE_VIRTIO MEMORY_PREALLOC MEMORY_SHARE ENABLE_AUDIO ENABLE_TPM SPICE_ENABLED ENABLE_UEFI HIDE_KVM LOCKED; do
         value="${_vcv_vm[$key]:-}"
         [[ "$value" =~ ^[01]$ ]] || {
             log_message "ERROR" "Invalid $key: '$value' (must be 0 or 1)" "$vm_name"; return 1; }
     done
+
+    case "${_vcv_vm[PERFORMANCE_PROFILE]:-balanced}" in
+        balanced|performance) ;;
+        *) log_message "ERROR" "Invalid PERFORMANCE_PROFILE: '${_vcv_vm[PERFORMANCE_PROFILE]:-}'" "$vm_name"; return 1 ;;
+    esac
+
+    if [[ -n "${_vcv_vm[CPU_AFFINITY]:-}" ]]; then
+        [[ "${_vcv_vm[CPU_AFFINITY]}" =~ ^[0-9,-]+$ ]] || {
+            log_message "ERROR" "Invalid CPU_AFFINITY: '${_vcv_vm[CPU_AFFINITY]}'" "$vm_name"; return 1; }
+        command -v taskset >/dev/null 2>&1 && taskset -c "${_vcv_vm[CPU_AFFINITY]}" true >/dev/null 2>&1 || {
+            log_message "ERROR" "CPU_AFFINITY selects unavailable CPUs: '${_vcv_vm[CPU_AFFINITY]}'" "$vm_name"; return 1; }
+    fi
 
     [[ "${_vcv_vm[VRAM_SIZE_MB]:-}" =~ ^[0-9]+$ && "${_vcv_vm[VRAM_SIZE_MB]}" -ge 16 && "${_vcv_vm[VRAM_SIZE_MB]}" -le 512 ]] || {
         log_message "ERROR" "Invalid VRAM_SIZE_MB: '${_vcv_vm[VRAM_SIZE_MB]:-}' (must be 16-512)" "$vm_name"; return 1; }
@@ -460,7 +611,7 @@ load_vm_config() {
 
     local line line_num=0 _key _val
     while IFS= read -r line || [[ -n "$line" ]]; do
-        (( line_num++ ))
+        (( ++line_num ))
         line="${line#"${line%%[![:space:]]*}"}"
         line="${line%"${line##*[![:space:]]}"}"
         [[ -z "$line" || "$line" == \#* ]] && continue
@@ -493,6 +644,10 @@ load_vm_config() {
             return 1
         fi
     done
+
+    _lvc_vm[PERFORMANCE_PROFILE]="${_lvc_vm[PERFORMANCE_PROFILE]:-balanced}"
+    _lvc_vm[HIDE_KVM]="${_lvc_vm[HIDE_KVM]:-0}"
+    _lvc_vm[CPU_AFFINITY]="${_lvc_vm[CPU_AFFINITY]:-}"
 
     validate_vm_config_values "$vm_name" _lvc_vm || {
         release_flock _fd "$config_file.lock"
@@ -585,12 +740,17 @@ check_vm_dependencies() {
 # NETWORK UTILS
 # =============================================================================
 
+tap_interface_name() {
+    local vm_name="$1" tap_hash
+    read -r tap_hash _ < <(echo -n "$vm_name" | md5sum)
+    printf 'qtap-%s-%s' "${vm_name:0:6}" "${tap_hash:0:5}"
+}
+
 setup_tap_interface() {
     local vm_name="$1"
     local -n _sti_vm="$2"
-    local tap_hash
-    read -r tap_hash _ < <(echo -n "$vm_name" | md5sum)
-    local tap_name="qtap-${vm_name:0:6}-${tap_hash:0:5}"
+    local tap_name
+    tap_name=$(tap_interface_name "$vm_name")
     local bridge="${_sti_vm[BRIDGE_NAME]:-}"
 
     if [[ ! -r /dev/net/tun || ! -w /dev/net/tun ]]; then
@@ -625,9 +785,8 @@ setup_tap_interface() {
 teardown_tap_interface() {
     local vm_name="$1"
     validate_vm_name "$vm_name" >/dev/null 2>&1 || return 1
-    local tap_hash
-    read -r tap_hash _ < <(echo -n "$vm_name" | md5sum)
-    local tap_name="qtap-${vm_name:0:6}-${tap_hash:0:5}"
+    local tap_name
+    tap_name=$(tap_interface_name "$vm_name")
     if ip link show "$tap_name" &>/dev/null; then
         ip link set "$tap_name" down       2>/dev/null || true
         ip tuntap del dev "$tap_name" mode tap 2>/dev/null || true
@@ -688,7 +847,8 @@ parse_port_spec() {
 manage_network_ports() {
     local vm_name="$1" action="$2" port_spec="${3:-}"
     require_vm "$vm_name" exists unlocked || return 1
-    vm_is_running "$vm_name" && { log_message "ERROR" "Cannot modify ports while running"; return 1; }
+    local operation_fd
+    acquire_stopped_vm_lock "$vm_name" operation_fd || return 1
 
     local -A VM=()
     load_vm_config "$vm_name" VM || return 1
@@ -717,6 +877,7 @@ manage_network_ports() {
 
     VM[PORT_FORWARDS]=$(IFS=,; echo "${new_array[*]:-}")
     save_vm_config "$vm_name" VM
+    release_flock operation_fd "$VM_DIR/$vm_name/qemu.pid.lock"
 }
 
 # =============================================================================
@@ -831,6 +992,10 @@ parse_usb_id() {
 manage_usb() {
     local vm_name="$1" action="$2" usb_id="${3:-}"
     require_vm "$vm_name" exists unlocked || return 1
+    local operation_fd=""
+    if [[ "$action" != "list" ]]; then
+        acquire_stopped_vm_lock "$vm_name" operation_fd || return 1
+    fi
 
     local -A VM=()
     load_vm_config "$vm_name" VM || return 1
@@ -872,6 +1037,7 @@ manage_usb() {
 
     VM[USB_DEVICES]=$(IFS=,; echo "${usb_array[*]:-}")
     save_vm_config "$vm_name" VM
+    [[ -z "$operation_fd" ]] || release_flock operation_fd "$VM_DIR/$vm_name/qemu.pid.lock"
 }
 
 # =============================================================================
@@ -956,8 +1122,10 @@ get_smb_share_path() {
 manage_shares() {
     local vm_name="$1" action="$2" spec="${3:-}"
     require_vm "$vm_name" exists unlocked || return 1
-    [[ "$action" != "list" ]] && vm_is_running "$vm_name" && {
-        log_message "ERROR" "Stop the VM before modifying shares"; return 1; }
+    local operation_fd=""
+    if [[ "$action" != "list" ]]; then
+        acquire_stopped_vm_lock "$vm_name" operation_fd || return 1
+    fi
 
     local -A VM=()
     load_vm_config "$vm_name" VM || return 1
@@ -998,6 +1166,7 @@ manage_shares() {
 
     VM[SHARED_FOLDERS]=$(IFS=,; echo "${share_array[*]:-}")
     save_vm_config "$vm_name" VM
+    [[ -z "$operation_fd" ]] || release_flock operation_fd "$VM_DIR/$vm_name/qemu.pid.lock"
 }
 
 start_virtiofsd_daemons() {
@@ -1026,7 +1195,14 @@ start_virtiofsd_daemons() {
         sock="$socket_dir/virtiofsd_${tag}.sock"
         pidf="$VM_DIR/$vm_name/virtiofsd_${tag}.pid"
 
-        "$virtiofsd_bin" --socket-path="$sock" --shared-dir="$path" --announce-submounts --sandbox=namespace \
+        local -a perf_opts=()
+        if [[ "${_svd_vm[PERFORMANCE_PROFILE]:-balanced}" == "performance" ]]; then
+            local queues="${_svd_vm[CORES]}"
+            (( queues > 4 )) && queues=4
+            perf_opts+=("--thread-pool-size=$queues")
+        fi
+
+        "$virtiofsd_bin" --socket-path="$sock" --shared-dir="$path" --announce-submounts --sandbox=namespace "${perf_opts[@]}" \
             &> "$VM_DIR/$vm_name/logs/virtiofsd_${tag}.log" &
         echo "$!" > "$pidf"
 
@@ -1092,6 +1268,7 @@ configure_uefi() {
     local vm_name="$1"
     local -n _uefi_vm="$2"
     local -n _uefi_cmd="$3"
+    local dry_run="${4:-0}"
 
     [[ "${_uefi_vm[ENABLE_UEFI]:-0}" != "1" ]] && return 0
 
@@ -1103,7 +1280,7 @@ configure_uefi() {
 
     # Each VM gets its own writable NVRAM copy so UEFI variables persist.
     local vm_vars="$VM_DIR/$vm_name/OVMF_VARS.fd"
-    if [[ ! -f "$vm_vars" ]]; then
+    if [[ ! -f "$vm_vars" && "$dry_run" != "1" ]]; then
         cp "$ovmf_vars_tmpl" "$vm_vars" && chmod 600 "$vm_vars" || {
             log_message "ERROR" "Failed to create VM UEFI vars file: $vm_vars" "$vm_name"; return 1; }
         log_message "INFO" "UEFI NVRAM initialised for $vm_name" "$vm_name"
@@ -1140,6 +1317,10 @@ stop_tpm() {
 configure_cpu() {
     local -n _cpu_vm="$1"
     local -n _cpu_cmd="$2"
+    local cpu_type="${_cpu_vm[CPU_TYPE]}"
+    if [[ "${_cpu_vm[MACHINE_OPTIONS]:-accel=kvm}" == "accel=tcg" && "$cpu_type" == "host" ]]; then
+        cpu_type="max"
+    fi
 
     if [[ "${_cpu_vm[OS_TYPE]:-linux}" == "windows" ]]; then
         local smp_topology
@@ -1151,12 +1332,18 @@ configure_cpu() {
 
         local hv_flags="hv-relaxed,hv-vapic,hv-spinlocks=0x1fff,hv-time"
         hv_flags+=",hv-vpindex,hv-synic,hv-stimer,hv-stimer-direct,hv-reset"
-        hv_flags+=",hv-frequencies,hv-runtime,hv-tlbflush,hv-reenlightenment,hv-ipi"
-        hv_flags+=",kvm=off,l3-cache=on,+topoext"
+        hv_flags+=",hv-frequencies,hv-runtime,hv-tlbflush,hv-ipi"
+        hv_flags+=",l3-cache=on,+topoext"
+        [[ "${_cpu_vm[HIDE_KVM]:-0}" == "1" ]] && hv_flags+=",kvm=off"
+        if [[ "${_cpu_vm[PERFORMANCE_PROFILE]:-balanced}" == "performance" &&
+              -r /sys/module/kvm_amd/parameters/avic &&
+              "$(< /sys/module/kvm_amd/parameters/avic)" == "Y" ]]; then
+            hv_flags+=",hv-avic"
+        fi
 
         _cpu_cmd+=(
             "-smp"    "$smp_topology"
-            "-cpu"    "${_cpu_vm[CPU_TYPE]},${hv_flags}"
+            "-cpu"    "${cpu_type},${hv_flags}"
             "-global" "kvm-pit.lost_tick_policy=delay"
             "-rtc"    "base=localtime,clock=host,driftfix=slew"
             "-device" "virtio-rng-pci"
@@ -1165,8 +1352,8 @@ configure_cpu() {
         )
     else
         _cpu_cmd+=(
-            "-smp" "${_cpu_vm[CORES]}"
-            "-cpu" "${_cpu_vm[CPU_TYPE]}"
+            "-smp" "${_cpu_vm[CORES]},sockets=1,cores=${_cpu_vm[CORES]},threads=1"
+            "-cpu" "$cpu_type"
         )
     fi
 }
@@ -1176,17 +1363,25 @@ configure_memory() {
     local -n _mem_cmd="$2"
 
     _mem_cmd+=("-m" "${_mem_vm[MEMORY]}")
+    local profile="${_mem_vm[PERFORMANCE_PROFILE]:-balanced}"
+    local prealloc="${_mem_vm[MEMORY_PREALLOC]:-0}"
+    [[ "$profile" == "performance" ]] && prealloc=1
+
     if [[ "${_mem_vm[MEMORY_SHARE]:-0}" == "1" ]]; then
+        local memfd_opts="memory-backend-memfd,id=mem0,size=${_mem_vm[MEMORY]},share=on"
+        [[ "$prealloc" == "1" ]] && memfd_opts+=",prealloc=on"
         _mem_cmd+=(
-            "-object" "memory-backend-memfd,id=mem0,size=${_mem_vm[MEMORY]},share=on"
+            "-object" "$memfd_opts"
             "-numa"   "node,memdev=mem0"
         )
-    elif [[ "${_mem_vm[MEMORY_PREALLOC]:-0}" == "1" ]]; then
+    elif [[ "$prealloc" == "1" ]]; then
         _mem_cmd+=(
             "-object" "memory-backend-ram,id=mem0,size=${_mem_vm[MEMORY]},prealloc=on"
             "-numa"   "node,memdev=mem0"
         )
     fi
+    [[ "$profile" == "performance" ]] && _mem_cmd+=("-overcommit" "mem-lock=on")
+    return 0
 }
 
 configure_disk() {
@@ -1218,11 +1413,11 @@ configure_disk() {
         drive_opts="format=qcow2,cache=${_dsk_vm[DISK_CACHE]},aio=${_dsk_vm[DISK_IO]},discard=${_dsk_vm[DISK_DISCARD]}"
     fi
 
-    _dsk_cmd+=("-object" "iothread,id=iothread0")
-
     case "${_dsk_vm[DISK_INTERFACE]}" in
         virtio)
-            local virtio_dev_opts="drive=drive0,iothread=iothread0,num-queues=${_dsk_vm[CORES]}"
+            local queues="${_dsk_vm[CORES]}"
+            (( queues > 8 )) && queues=8
+            local virtio_dev_opts="drive=drive0,iothread=iothread0,num-queues=${queues}"
             if [[ -n "${_dsk_vm[DISK_DEV]:-}" ]]; then
                 # write-cache=on: the SSD has its own hardware write cache; tell
                 #   the guest so it doesn't issue redundant flush commands.
@@ -1231,15 +1426,23 @@ configure_disk() {
                 virtio_dev_opts+=",write-cache=on,packed=on,discard=on"
             fi
             _dsk_cmd+=(
+                "-object" "iothread,id=iothread0"
                 "-drive"  "file=${disk_file},if=none,id=drive0,${drive_opts}"
-                "-device" "virtio-blk-pci,${virtio_dev_opts}"
+                "-device" "virtio-blk-pci,${virtio_dev_opts},werror=stop,rerror=report"
             ) ;;
         nvme)
             _dsk_cmd+=(
                 "-drive"  "file=${disk_file},if=none,id=drive0,${drive_opts}"
-                "-device" "nvme,drive=drive0,serial=qemate-nvme,num_queues=${_dsk_vm[CORES]}"
+                "-device" "nvme,drive=drive0,serial=qemate-nvme,max_ioqpairs=${_dsk_vm[CORES]}"
             ) ;;
-        *)
+        sata)
+            # q35 exposes its AHCI/SATA controller through QEMU's IDE device
+            # frontend; the legacy `-drive if=sata` spelling is unsupported.
+            _dsk_cmd+=(
+                "-drive"  "file=${disk_file},if=none,id=drive0,${drive_opts}"
+                "-device" "ide-hd,drive=drive0,bus=ide.0"
+            ) ;;
+        ide)
             _dsk_cmd+=("-drive" "file=${disk_file},if=${_dsk_vm[DISK_INTERFACE]},${drive_opts}") ;;
     esac
 }
@@ -1299,6 +1502,7 @@ configure_network() {
     local vm_name="$1"
     local -n _net_vm="$2"
     local -n _net_cmd="$3"
+    local dry_run="${4:-0}"
 
     if [[ "${_net_vm[NETWORK_MODEL]}" == "virtio-net-pci" && "${_net_vm[ENABLE_VIRTIO]:-1}" != "1" ]]; then
         log_message "WARNING" "virtio-net-pci requested but ENABLE_VIRTIO=0; falling back to e1000." "$vm_name"
@@ -1376,7 +1580,12 @@ configure_network() {
             log_message "INFO" "Network: passt (unprivileged)" "$vm_name" ;;
 
         tap)
-            local tap_name; tap_name=$(setup_tap_interface "$vm_name" _net_vm) || return 1
+            local tap_name
+            if [[ "$dry_run" == "1" ]]; then
+                tap_name=$(tap_interface_name "$vm_name")
+            else
+                tap_name=$(setup_tap_interface "$vm_name" _net_vm) || return 1
+            fi
             local queues=$(( _net_vm[CORES] / 2 ))
             (( queues < 1 )) && queues=1
             (( queues > 8 )) && queues=8
@@ -1410,6 +1619,7 @@ configure_audio() {
     local vm_name="$1"
     local -n _aud_conf="$2"
     local -n _aud_cmd="$3"
+    local dry_run="${4:-0}"
 
     [[ "${_aud_conf[ENABLE_AUDIO]:-0}" != "1" ]] && return 0
     local pci_spec="${_aud_conf[AUDIO_PASSTHROUGH_PCI]:-}"
@@ -1424,6 +1634,11 @@ configure_audio() {
 
     [[ ! -d "$dev_path" ]] && {
         log_message "ERROR" "Audio PCI device $pci_id not found" "$vm_name"; return 1; }
+
+    if [[ "$dry_run" == "1" ]]; then
+        _aud_cmd+=("-device" "vfio-pci,host=${pci_id#0000:},id=hostaudio0,bus=pcie.0")
+        return 0
+    fi
 
     local vendor vendor_id device device_id
     read -r vendor < "$dev_path/vendor"; vendor_id="${vendor#0x}"
@@ -1553,6 +1768,7 @@ configure_shares_virtiofs() {
     local vm_name="$1"
     local -n _cvf_vm="$2"
     local -n _cvf_cmd="$3"
+    local dry_run="${4:-0}"
     local socket_dir="$VM_DIR/$vm_name/sockets"
 
     _cvf_vm[MEMORY_SHARE]=1
@@ -1560,11 +1776,18 @@ configure_shares_virtiofs() {
     local s tag sock
     for s in "${shares[@]}"; do
         tag="${s%%:*}"; sock="$socket_dir/virtiofsd_${tag}.sock"
-        if [[ ! -S "$sock" ]]; then
+        if [[ "$dry_run" != "1" && ! -S "$sock" ]]; then
             log_message "ERROR" "virtiofsd socket missing for share: $tag" "$vm_name"
             return 1
         fi
-        _cvf_cmd+=("-chardev" "socket,id=char_${tag},path=${sock}" "-device" "vhost-user-fs-pci,chardev=char_${tag},tag=${tag}")
+        local device_opts="vhost-user-fs-pci,chardev=char_${tag},tag=${tag}"
+        if [[ "${_cvf_vm[PERFORMANCE_PROFILE]:-balanced}" == "performance" ]]; then
+            # Rust virtiofsd currently exposes one request queue.  Its thread
+            # pool handles requests in parallel; asking QEMU for extra request
+            # queues makes virtiofsd reject virtqueue 2 with InvalidParam.
+            device_opts+=",queue-size=1024"
+        fi
+        _cvf_cmd+=("-chardev" "socket,id=char_${tag},path=${sock}" "-device" "$device_opts")
         log_message "INFO" "VirtIO-FS: '$tag'" "$vm_name"
     done
 }
@@ -1573,6 +1796,7 @@ configure_shares() {
     local vm_name="$1"
     local -n _cs_vm="$2"
     local -n _cs_cmd="$3"
+    local dry_run="${4:-0}"
 
     [[ -z "${_cs_vm[SHARED_FOLDERS]:-}" ]] && return 0
     local backend; backend=$(resolve_share_backend _cs_vm)
@@ -1580,8 +1804,8 @@ configure_shares() {
     case "$backend" in
         virtiofs)
             log_message "INFO" "Shares: VirtIO-FS (multi-share)" "$vm_name"
-            start_virtiofsd_daemons "$vm_name" _cs_vm || return 1
-            configure_shares_virtiofs "$vm_name" _cs_vm _cs_cmd ;;
+            [[ "$dry_run" == "1" ]] || start_virtiofsd_daemons "$vm_name" _cs_vm || return 1
+            configure_shares_virtiofs "$vm_name" _cs_vm _cs_cmd "$dry_run" ;;
         virtfs)
             log_message "INFO" "Shares: VirtFS 9p (fallback)" "$vm_name"
             configure_shares_virtfs "$vm_name" _cs_vm _cs_cmd ;;
@@ -1599,6 +1823,7 @@ configure_tpm() {
     local vm_name="$1"
     local -n _tpm_vm="$2"
     local -n _tpm_cmd="$3"
+    local dry_run="${4:-0}"
 
     [[ "${_tpm_vm[ENABLE_TPM]:-0}" != "1" ]] && return 0
     command -v swtpm &>/dev/null || { log_message "ERROR" "swtpm not found; TPM is required for this VM." "$vm_name"; return 1; }
@@ -1606,6 +1831,11 @@ configure_tpm() {
     local tpm_dir="$VM_DIR/$vm_name/tpm"
     local tpm_sock="$VM_DIR/$vm_name/sockets/swtpm.sock"
     local tpm_pid="$VM_DIR/$vm_name/swtpm.pid"
+
+    if [[ "$dry_run" == "1" ]]; then
+        _tpm_cmd+=("-chardev" "socket,id=chrtpm,path=$tpm_sock" "-tpmdev" "emulator,id=tpm0,chardev=chrtpm" "-device" "tpm-crb,tpmdev=tpm0")
+        return 0
+    fi
     mkdir -p "$tpm_dir"
 
     if [[ ! -f "$tpm_dir/tpm2-00.permall" ]]; then
@@ -1644,9 +1874,10 @@ configure_tpm() {
 # =============================================================================
 
 create() {
+    require_qemu_version qemu-img || return 1
     local vm_name="$1"; shift
     local os_type="linux" memory="" cores="" disk_size="" disk_dev="" machine_type="" \
-          machine_options="" enable_audio="" enable_tpm="" enable_uefi="" spice_enabled="" share_backend=""
+          machine_options="" enable_audio="" enable_tpm="" enable_uefi="" spice_enabled="" share_backend="" profile="balanced"
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -1671,6 +1902,7 @@ create() {
             --spice)         spice_enabled="1";   shift ;;
             --no-spice)      spice_enabled="0";   shift ;;
             --share-backend) [[ $# -ge 2 && "$2" != --* ]] || { log_message "ERROR" "--share-backend requires a value"; return 1; }; share_backend="$2";  shift 2 ;;
+            --profile)       [[ $# -ge 2 && "$2" != --* ]] || { log_message "ERROR" "--profile requires a value"; return 1; }; profile="$2"; shift 2 ;;
             *) log_message "ERROR" "Unknown option: $1"; return 1 ;;
         esac
     done
@@ -1683,6 +1915,8 @@ create() {
         log_message "ERROR" "Invalid share backend: '$share_backend'. Use: auto, virtfs, smb, virtiofs"
         return 1
     fi
+    [[ "$profile" =~ ^(balanced|performance)$ ]] || {
+        log_message "ERROR" "Invalid profile: '$profile'. Use: balanced, performance"; return 1; }
 
     if [[ -n "$cores" ]]; then
         [[ ! "$cores" =~ ^[0-9]+$ || "$cores" -lt 1 || "$cores" -gt 64 ]] && {
@@ -1728,6 +1962,10 @@ create() {
 
     local -A VM=()
     apply_os_defaults "$os_type" VM
+    VM[PERFORMANCE_PROFILE]="$profile"
+    if [[ "$os_type" == "windows" && "$profile" == "performance" ]]; then
+        VM[DISK_INTERFACE]="virtio"
+    fi
 
     [[ -n "$cores"           ]] && VM[CORES]="$cores"
     [[ -n "$memory"          ]] && VM[MEMORY]="$memory"
@@ -1786,8 +2024,9 @@ create() {
 }
 
 start() {
+    require_qemu_version qemu-system-x86_64 || return 1
     local vm_name="$1"; shift
-    local headless="0" iso_file="" virtio_iso="" debug="0"
+    local headless="0" iso_file="" virtio_iso="" debug="0" dry_run="0"
 
     # Parse options
     while [[ $# -gt 0 ]]; do
@@ -1796,29 +2035,45 @@ start() {
             --iso)      [[ $# -ge 2 && "$2" != --* ]] || { log_message "ERROR" "--iso requires a path"; return 1; }; iso_file="$2"; shift 2 ;;
             --virtio-iso) [[ $# -ge 2 && "$2" != --* ]] || { log_message "ERROR" "--virtio-iso requires a path"; return 1; }; virtio_iso="$2"; shift 2 ;;
             --debug)    debug="1"; shift ;;
+            --dry-run)  dry_run="1"; shift ;;
             *) log_message "ERROR" "Unknown option: $1"; return 1 ;;
         esac
     done
 
+    # A dry run must not change VM state, including its command log.
+    [[ "$dry_run" == "1" ]] && QEMATE_SUPPRESS_FILE_LOG=1
+
     require_vm "$vm_name" exists not-running || return 1
 
-    QEMATE_ACTIVE_VM="$vm_name"
-    QEMATE_PHASE="starting"
-    QEMATE_CLEANUP_DONE=0
-    trap cleanup_active_vm EXIT
+    if [[ "$dry_run" != "1" ]]; then
+        QEMATE_LOCK_FILE="$VM_DIR/$vm_name/qemu.pid.lock"
+        acquire_flock "$QEMATE_LOCK_FILE" QEMATE_LOCK_FD || {
+            log_message "ERROR" "VM lifecycle is busy (starting or running): $vm_name" "$vm_name"
+            return 1
+        }
+        QEMATE_ACTIVE_VM="$vm_name"
+        QEMATE_PHASE="starting"
+        QEMATE_CLEANUP_DONE=0
+        trap cleanup_active_vm EXIT
 
-    if ! vm_is_running "$vm_name"; then
         stop_virtiofsd_daemons "$vm_name"
         stop_tpm "$vm_name"
+        rm -f "$VM_DIR/$vm_name/sockets/qmp.sock"
     fi
 
     local -A VM=()
     load_vm_config "$vm_name" VM || return 1
     check_vm_dependencies "$vm_name" VM || return 1
+    [[ "${VM[PERFORMANCE_PROFILE]:-balanced}" != "performance" ]] || \
+        validate_performance_memory "$vm_name" "${VM[MEMORY]}" || return 1
 
-    log_message "INFO" "Starting VM: $vm_name" "$vm_name"
+    if [[ "$dry_run" == "1" ]]; then
+        log_message "INFO" "Dry run for VM: $vm_name" "$vm_name"
+    else
+        log_message "INFO" "Starting VM: $vm_name" "$vm_name"
+    fi
 
-    [[ "${VM[MACHINE_OPTIONS]}" =~ accel=kvm ]] && [[ ! -w /dev/kvm ]] && {
+    [[ "$dry_run" != "1" && "${VM[MACHINE_OPTIONS]}" =~ accel=kvm ]] && [[ ! -w /dev/kvm ]] && {
         log_message "ERROR" "/dev/kvm not writable. Run: sudo usermod -aG kvm $USER"
         return 1
     }
@@ -1836,9 +2091,10 @@ start() {
         "-name" "${VM[NAME]},process=${VM[NAME]}"
         "-machine" "$machine_str"
         "-pidfile" "$VM_DIR/$vm_name/qemu.pid"
+        "-qmp" "unix:$VM_DIR/$vm_name/sockets/qmp.sock,server=on,wait=off"
     )
 
-    configure_uefi "$vm_name" VM qemu_cmd || return 1
+    configure_uefi "$vm_name" VM qemu_cmd "$dry_run" || return 1
     configure_cpu VM qemu_cmd
     configure_memory VM qemu_cmd
 
@@ -1865,30 +2121,42 @@ start() {
         qemu_cmd+=("-drive" "file=${virtio_iso},format=raw,readonly=on,media=cdrom,id=cdrom1")
     fi
 
-    configure_audio "$vm_name" VM qemu_cmd || return 1
+    configure_audio "$vm_name" VM qemu_cmd "$dry_run" || return 1
     configure_usb_passthrough "$vm_name" VM qemu_cmd || return 1
-    configure_shares "$vm_name" VM qemu_cmd || { stop_virtiofsd_daemons "$vm_name"; return 1; }
-    configure_tpm "$vm_name" VM qemu_cmd || return 1
-    configure_network "$vm_name" VM qemu_cmd || return 1
+    configure_shares "$vm_name" VM qemu_cmd "$dry_run" || { [[ "$dry_run" == "1" ]] || stop_virtiofsd_daemons "$vm_name"; return 1; }
+    configure_tpm "$vm_name" VM qemu_cmd "$dry_run" || return 1
+    configure_network "$vm_name" VM qemu_cmd "$dry_run" || return 1
 
-    if [[ "$debug" == "1" ]]; then
-        echo -e "\n[DEBUG] Generated QEMU command:\n${qemu_cmd[*]}\n" >&2
+    local launch_cmd=("${qemu_cmd[@]}")
+    if [[ -n "${VM[CPU_AFFINITY]:-}" ]]; then
+        require_commands taskset || return 1
+        launch_cmd=("taskset" "-c" "${VM[CPU_AFFINITY]}" "${qemu_cmd[@]}")
     fi
 
-    local lockfile="$VM_DIR/$vm_name/qemu.pid.lock" _fd
-    acquire_flock "$lockfile" _fd || { log_message "ERROR" "Cannot acquire start lock"; return 1; }
+    if [[ "$debug" == "1" || "$dry_run" == "1" ]]; then
+        printf '\n[DEBUG] Generated QEMU command:\n' >&2
+        printf '%q ' "${launch_cmd[@]}" >&2
+        printf '\n\n' >&2
+    fi
+    [[ "$dry_run" == "1" ]] && return 0
 
     QEMATE_PHASE="running"
     log_message "INFO" "Launching QEMU process for $vm_name..." "$vm_name"
 
     local qemu_status=0
-    "${qemu_cmd[@]}" {_fd}>&- 2>"$VM_DIR/$vm_name/logs/error.log" || qemu_status=$?
+    local log_stamp qemu_log
+    printf -v log_stamp '%(%Y%m%d-%H%M%S)T' -1
+    qemu_log="$VM_DIR/$vm_name/logs/qemu-${log_stamp}.log"
+    if [[ -e "$VM_DIR/$vm_name/logs/error.log" && ! -L "$VM_DIR/$vm_name/logs/error.log" ]]; then
+        mv "$VM_DIR/$vm_name/logs/error.log" "$VM_DIR/$vm_name/logs/qemu-legacy-${log_stamp}.log"
+    fi
+    ln -sfn "${qemu_log##*/}" "$VM_DIR/$vm_name/logs/error.log"
+    "${launch_cmd[@]}" {QEMATE_LOCK_FD}>&- 2>"$qemu_log" || qemu_status=$?
 
     log_message "INFO" "QEMU process terminated (exit: $qemu_status)" "$vm_name"
 
     cleanup_active_vm
     rm -f "$VM_DIR/$vm_name/qemu.pid"
-    release_flock _fd "$lockfile"
     trap - EXIT
 
     if [[ $qemu_status -eq 0 ]]; then
@@ -1904,15 +2172,27 @@ start() {
 
 stop() {
     local vm_name="$1"; shift
-    local force="false"
+    local force="false" timeout_seconds="$DEFAULT_STOP_TIMEOUT"
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --force) force="true"; shift ;;
+            --timeout)
+                [[ $# -ge 2 && "$2" =~ ^[0-9]+$ && "$2" -ge 1 && "$2" -le 3600 ]] || {
+                    log_message "ERROR" "--timeout requires 1-3600 seconds"; return 1; }
+                timeout_seconds="$2"; shift 2 ;;
             *) log_message "ERROR" "Unknown option: $1"; return 1 ;;
         esac
     done
 
-    require_vm "$vm_name" exists running || return 1
+    require_vm "$vm_name" exists || return 1
+    if ! vm_is_running "$vm_name"; then
+        if vm_lifecycle_busy "$vm_name"; then
+            log_message "ERROR" "VM is still starting; retry stop when its control socket is ready" "$vm_name"
+        else
+            log_message "ERROR" "VM is not running" "$vm_name"
+        fi
+        return 1
+    fi
     local pid
     read -r pid < "$VM_DIR/$vm_name/qemu.pid"
     vm_pid_matches "$vm_name" "$pid" || { log_message "ERROR" "VM process identity changed; refusing to signal it"; return 1; }
@@ -1920,19 +2200,28 @@ stop() {
 
     if [[ "$force" == "true" ]]; then
         vm_pid_matches "$vm_name" "$pid" && kill -9 "$pid" || true
+        log_message "WARNING" "Force-stopped QEMU; the guest did not receive an orderly shutdown request." "$vm_name"
     else
-        vm_pid_matches "$vm_name" "$pid" && kill -15 "$pid" || true
+        qmp_command "$vm_name" system_powerdown || {
+            log_message "ERROR" "Graceful shutdown could not be requested. The VM was left running; use --force only if necessary." "$vm_name"
+            return 1
+        }
+        log_message "INFO" "Guest shutdown requested; waiting up to ${timeout_seconds}s..." "$vm_name"
         local i
-        for (( i=0; i<30; i++ )); do
+        for (( i=0; i<timeout_seconds; i++ )); do
             vm_pid_matches "$vm_name" "$pid" || break; sleep 1
         done
-        vm_pid_matches "$vm_name" "$pid" && kill -9 "$pid" || true
+        if vm_pid_matches "$vm_name" "$pid"; then
+            log_message "ERROR" "Guest did not shut down within ${timeout_seconds}s. It was left running; retry or use --force." "$vm_name"
+            return 1
+        fi
     fi
 
-    [[ "$(< "$VM_DIR/$vm_name/qemu.pid" 2>/dev/null)" == "$pid" ]] && rm -f "$VM_DIR/$vm_name/qemu.pid"
-    stop_virtiofsd_daemons "$vm_name"
-    stop_tpm               "$vm_name"
-    teardown_tap_interface "$vm_name"
+    local i
+    for (( i=0; i<50; i++ )); do
+        vm_pid_matches "$vm_name" "$pid" || break
+        sleep 0.1
+    done
     log_message "INFO" "VM stopped: $vm_name" "$vm_name"
 }
 
@@ -1952,16 +2241,20 @@ delete() {
         log_message "ERROR" "VM is locked. Use --force to override."; return 1; }
     vm_is_running "$vm_name" && {
         log_message "ERROR" "VM is running. Stop it first."; return 1; }
+    local operation_fd
+    acquire_stopped_vm_lock "$vm_name" operation_fd || return 1
 
     if [[ "$force" != "true" ]]; then
         read -r -p "Delete VM '$vm_name' and all its data? [y/N]: " confirm
         [[ ! "$confirm" =~ ^[Yy]$ ]] && return 0
     fi
     rm -rf "${VM_DIR:?}/${vm_name:?}"
+    release_flock operation_fd "$VM_DIR/$vm_name/qemu.pid.lock"
     log_message "INFO" "VM deleted: $vm_name"
 }
 
 resize_disk() {
+    require_qemu_version qemu-img || return 1
     local vm_name="$1" new_size="$2"; shift 2
     local force="false"
     while [[ $# -gt 0 ]]; do
@@ -1984,6 +2277,8 @@ resize_disk() {
         log_message "ERROR" "Cannot resize while VM is running. Stop the VM first; safe online resize requires QMP support, which is not implemented." "$vm_name"
         return 1
     fi
+    local operation_fd
+    acquire_stopped_vm_lock "$vm_name" operation_fd || return 1
 
     [[ ! "$new_size" =~ ^(\+)?[0-9]+[GMgm]$ ]] && {
         log_message "ERROR" "Invalid size: '$new_size'. Use e.g. 80G or +20G" "$vm_name"; return 1; }
@@ -2000,14 +2295,15 @@ resize_disk() {
         save_vm_config "$vm_name" VM
         log_message "INFO" "Disk resized to ${VM[DISK_SIZE]}" "$vm_name"
     fi
+    release_flock operation_fd "$VM_DIR/$vm_name/qemu.pid.lock"
 }
 
 # configure VM_NAME — Opens the VM config file directly in the editor.
 configure() {
     local vm_name="$1"
     require_vm "$vm_name" exists unlocked || return 1
-    vm_is_running "$vm_name" && {
-        log_message "ERROR" "Stop the VM before configuring"; return 1; }
+    local operation_fd
+    acquire_stopped_vm_lock "$vm_name" operation_fd || return 1
 
     local config_file="$VM_DIR/$vm_name/config"
     local backup
@@ -2029,6 +2325,7 @@ configure() {
         return 1
     fi
     rm -f "$backup"
+    release_flock operation_fd "$VM_DIR/$vm_name/qemu.pid.lock"
     log_message "INFO" "Config applied successfully." "$vm_name"
 }
 
@@ -2048,16 +2345,21 @@ list() {
         [[ -d "$vm_path" ]] || continue
         name="${vm_path%/}"
         name="${name##*/}"
-        stat="stopped"; vm_is_running "$name" && stat="running"
-        lock="no"; vm_is_locked  "$name" && lock="yes"
+        stat="stopped"
+        if vm_is_running "$name"; then stat="running"
+        elif vm_lifecycle_busy "$name"; then stat="starting"
+        fi
 
         local -A VM=()
-        os="?" audio="?" tpm="?" spice="?"
+        lock="?" os="?" audio="?" tpm="?" spice="?"
         if load_vm_config "$name" VM 2>/dev/null; then
+            lock="no"; [[ "${VM[LOCKED]:-0}" == "1" ]] && lock="yes"
             os="${VM[OS_TYPE]:-?}"
             audio="${VM[ENABLE_AUDIO]:-0}"; [[ "$audio" == "1" ]] && audio="on"  || audio="off"
             tpm="${VM[ENABLE_TPM]:-0}";     [[ "$tpm"   == "1" ]] && tpm="on"    || tpm="off"
             spice="${VM[SPICE_ENABLED]:-0}"; [[ "$spice" == "1" ]] && spice="on" || spice="off"
+        else
+            log_message "WARNING" "Invalid configuration: $name"
         fi
         printf "%-18s %-10s %-8s %-10s %-6s %-5s %-5s\n" \
             "$name" "$stat" "$lock" "$os" "$audio" "$tpm" "$spice"
@@ -2071,25 +2373,34 @@ status() {
     local -A VM=()
     load_vm_config "$vm_name" VM || return 1
 
-    local running; vm_is_running "$vm_name" && running="● Running" || running="○ Stopped"
+    local running
+    if vm_is_running "$vm_name"; then running="● Running"
+    elif vm_lifecycle_busy "$vm_name"; then running="◐ Starting"
+    else running="○ Stopped"
+    fi
     echo ""
     echo "  VM: $vm_name  [$running]"
     echo "  ─────────────────────────────────────────────"
     printf "  %-16s %s\n" "OS Type:"        "${VM[OS_TYPE]:-?}"
     printf "  %-16s %s\n" "CPU:"            "${VM[CPU_TYPE]} × ${VM[CORES]} cores"
     printf "  %-16s %s\n" "Memory:"         "${VM[MEMORY]}"
+    printf "  %-16s %s\n" "Profile:"        "${VM[PERFORMANCE_PROFILE]:-balanced}"
+    printf "  %-16s %s\n" "Memory policy:"  "$( [[ "${VM[PERFORMANCE_PROFILE]:-balanced}" == "performance" || "${VM[MEMORY_PREALLOC]:-0}" == "1" ]] && echo "preallocated" || echo "demand-allocated" )"
+    printf "  %-16s %s\n" "CPU affinity:"   "${VM[CPU_AFFINITY]:-automatic}"
     printf "  %-16s %s\n" "Machine:"        "${VM[MACHINE_TYPE]} (${VM[MACHINE_OPTIONS]})"
     printf "  %-16s %s\n" "Video:"          "${VM[VIDEO_TYPE]}"
     printf "  %-16s %s\n" "Disk Interface:" "${VM[DISK_INTERFACE]}"
+    printf "  %-16s %s\n" "Disk I/O:"       "${VM[DISK_IO]} / cache=${VM[DISK_CACHE]} / discard=${VM[DISK_DISCARD]}"
     if [[ -n "${VM[DISK_DEV]:-}" ]]; then
         printf "  %-16s %s\n" "Disk Device:"    "${VM[DISK_DEV]} (physical, raw)"
-        printf "  %-16s %s\n" "Disk Size:"      "${VM[DISK_SIZE]}"
+        printf "  %-16s %s\n" "Disk Size:"      "${VM[DISK_SIZE]:-unknown}"
     else
         printf "  %-16s %s\n" "Disk Size:"      "${VM[DISK_SIZE]}"
     fi
     printf "  %-16s %s\n" "Network:"        "${VM[NETWORK_TYPE]} / ${VM[NETWORK_MODEL]}"
     printf "  %-16s %s\n" "UEFI:"           "$( [[ "${VM[ENABLE_UEFI]:-0}" == "1" ]] && echo "enabled" || echo "disabled (SeaBIOS)" )"
-    printf "  %-16s %s\n" "Share backend:"  "${VM[SHARE_BACKEND]:-auto}"
+    local effective_share; effective_share=$(resolve_share_backend VM)
+    printf "  %-16s %s\n" "Share backend:"  "${VM[SHARE_BACKEND]:-auto} (effective: $effective_share)"
     printf "  %-16s %s\n" "Security:" "$( [[ "${VM[LOCKED]:-0}" == "1" ]] && echo "locked" || echo "unlocked" )"
 
     [[ -n "${VM[PORT_FORWARDS]:-}" ]] && printf "  %-16s %s\n" "Port forwards:" "${VM[PORT_FORWARDS]}"
@@ -2121,6 +2432,94 @@ lock_unlock() {
     log_message "INFO" "VM $vm_name $( [[ "$state" == "1" ]] && echo "locked" || echo "unlocked" )"
 }
 
+tune_vm() {
+    local vm_name="$1" profile="$2"
+    [[ "$profile" =~ ^(balanced|performance)$ ]] || {
+        log_message "ERROR" "Invalid profile: '$profile'. Use: balanced, performance"; return 1; }
+    require_vm "$vm_name" exists unlocked || return 1
+    local operation_fd
+    acquire_stopped_vm_lock "$vm_name" operation_fd || return 1
+    local -A VM=()
+    load_vm_config "$vm_name" VM || return 1
+    [[ "$profile" != "performance" ]] || validate_performance_memory "$vm_name" "${VM[MEMORY]}" || return 1
+    VM[PERFORMANCE_PROFILE]="$profile"
+    save_vm_config "$vm_name" VM || return 1
+    release_flock operation_fd "$VM_DIR/$vm_name/qemu.pid.lock"
+    log_message "INFO" "VM $vm_name tuned for profile: $profile" "$vm_name"
+}
+
+doctor_item() {
+    local state="$1" message="$2"
+    printf "  [%-4s] %s\n" "$state" "$message"
+}
+
+doctor_qemu_command() {
+    local command_name="$1" major version_output first_line
+    if ! command -v "$command_name" >/dev/null 2>&1; then
+        doctor_item FAIL "$command_name is not installed"
+        return 1
+    fi
+    major=$(qemu_major_version "$command_name") || {
+        doctor_item FAIL "could not determine $command_name version (QEMU ${MIN_QEMU_VERSION}+ required)"
+        return 1
+    }
+    version_output=$("$command_name" --version 2>/dev/null)
+    first_line="${version_output%%$'\n'*}"
+    if (( major < MIN_QEMU_MAJOR )); then
+        doctor_item FAIL "$first_line (QEMU ${MIN_QEMU_VERSION}+ required)"
+        return 1
+    fi
+    doctor_item OK "$first_line"
+}
+
+doctor() {
+    local vm_name="${1:-}" failures=0
+    echo "Qemate host diagnostics"
+    echo "────────────────────────────────────────────────────────"
+
+    doctor_qemu_command qemu-system-x86_64 || failures=1
+    doctor_qemu_command qemu-img || failures=1
+    [[ -r /dev/kvm && -w /dev/kvm ]] && doctor_item OK "KVM acceleration is accessible" || doctor_item WARN "/dev/kvm is not accessible"
+    if have_unix_nc; then doctor_item OK "QMP client available (nc -U)"
+    else doctor_item FAIL "OpenBSD netcat with nc -U is required for graceful stop"; failures=1
+    fi
+    [[ -r /dev/vhost-net && -w /dev/vhost-net ]] && doctor_item OK "vhost-net acceleration is accessible" || doctor_item INFO "vhost-net unavailable; relevant only to TAP networking"
+    if [[ -r /sys/module/kvm_amd/parameters/avic ]]; then
+        local avic; avic=$(< /sys/module/kvm_amd/parameters/avic)
+        [[ "$avic" == "Y" ]] && doctor_item OK "AMD AVIC is active" || doctor_item INFO "AMD AVIC is disabled"
+    fi
+    doctor_item INFO "memlock limit: $(ulimit -l) KiB"
+
+    [[ -z "$vm_name" ]] && return "$failures"
+    echo ""
+    echo "VM diagnostics: $vm_name"
+    require_vm "$vm_name" exists || return 1
+    local -A VM=()
+    load_vm_config "$vm_name" VM || return 1
+    doctor_item INFO "profile=${VM[PERFORMANCE_PROFILE]:-balanced}, vCPUs=${VM[CORES]}, memory=${VM[MEMORY]}"
+    doctor_item INFO "disk=${VM[DISK_INTERFACE]}, aio=${VM[DISK_IO]}, cache=${VM[DISK_CACHE]}"
+    local backend; backend=$(resolve_share_backend VM)
+    doctor_item INFO "share backend: ${VM[SHARE_BACKEND]:-auto} (effective: $backend)"
+    [[ "$backend" != "virtfs" ]] || doctor_item WARN "VirtFS/9p favors compatibility over shared-folder performance"
+    if [[ -n "${VM[DISK_DEV]:-}" && "${VM[DISK_INTERFACE]}" == "virtio" && "${VM[DISK_IO]}" == "io_uring" && "${VM[DISK_CACHE]}" == "none" ]]; then
+        doctor_item OK "physical disk uses the direct VirtIO/io_uring fast path"
+    fi
+    if [[ "${VM[PERFORMANCE_PROFILE]:-balanced}" == "performance" ]]; then
+        if validate_performance_memory "$vm_name" "${VM[MEMORY]}"; then
+            doctor_item OK "locked-memory prerequisites satisfied"
+        else
+            failures=1
+        fi
+    else
+        doctor_item INFO "performance profile is available via: qemate tune $vm_name performance"
+    fi
+    [[ -z "${VM[CPU_AFFINITY]:-}" ]] && doctor_item INFO "CPU affinity is automatic (no host cores are reserved)"
+    if vm_is_running "$vm_name"; then
+        [[ -S "$VM_DIR/$vm_name/sockets/qmp.sock" ]] && doctor_item OK "QMP control socket is ready" || doctor_item WARN "running VM has no QMP control socket"
+    fi
+    return "$failures"
+}
+
 # =============================================================================
 # CLI / HELP
 # =============================================================================
@@ -2145,14 +2544,17 @@ VM
       --uefi         | --no-uefi        (default: on for windows, off for linux)
       --spice        | --no-spice
       --share-backend auto|virtfs|smb|virtiofs
+      --profile balanced|performance
 
-  start   <name> [--headless] [--iso PATH] [--virtio-iso PATH] [--debug]
-  stop    <name> [--force]
+  start   <name> [--headless] [--iso PATH] [--virtio-iso PATH] [--debug] [--dry-run]
+  stop    <name> [--timeout SECONDS] [--force]
   delete  <name> [--force]
   resize  <name> <SIZE|+SIZE> [--force]   VM must be stopped; --force is reserved
   list
   status  <name>
   config  <name>     edit VM config in \$EDITOR
+  tune    <name> balanced|performance
+  doctor  [name]
 
 NETWORK
   port-add    <name> <[ip:]host:guest[:tcp|udp]>
@@ -2185,15 +2587,11 @@ main() {
         [[ "$arg" == "--help" || "$arg" == "-h" ]] && { display_help; exit 0; }
     done
 
-    mkdir -p "$VM_DIR"
-    chmod 700 "$VM_DIR"
     [[ $# -eq 0 ]] && { display_help; exit 0; }
 
-    local cmd
-    for cmd in qemu-system-x86_64 qemu-img flock; do
-        command -v "$cmd" &>/dev/null || {
-            echo "Error: required binary '$cmd' not found in PATH." >&2; exit 1; }
-    done
+    mkdir -p "$VM_DIR"
+    chmod 700 "$VM_DIR"
+    [[ "$1" == "doctor" ]] || require_commands flock
 
     local verb="$1"; shift
     case "$verb" in
@@ -2203,6 +2601,8 @@ main() {
         delete)        [[ $# -eq 0 ]] && { echo "Error: VM name required"; exit 1; }; delete      "$@" ;;
         resize)        [[ $# -lt 2 ]] && { echo "Error: VM name and size required"; exit 1; }; resize_disk "$@" ;;
         status)        [[ $# -eq 0 ]] && { echo "Error: VM name required"; exit 1; }; status      "$@" ;;
+        tune)          [[ $# -lt 2 ]] && { echo "Error: VM name and profile required"; exit 1; }; tune_vm "$1" "$2" ;;
+        doctor)        doctor "${1:-}" ;;
         configure|config) [[ $# -eq 0 ]] && { echo "Error: VM name required"; exit 1; }; configure   "$@" ;;
         list)          list ;;
         port-add)      [[ $# -lt 2 ]] && { echo "Error: VM name and port spec required"; exit 1; }
@@ -2225,4 +2625,6 @@ main() {
     esac
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

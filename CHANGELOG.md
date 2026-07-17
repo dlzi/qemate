@@ -2,6 +2,25 @@
 
 All notable changes to Qemate will be documented in this file.
 
+## [4.3.0] - 2026-07-17
+### QEMU compatibility
+- Require QEMU 10.0 or newer in runtime checks, installation checks, package metadata, and documentation.
+- Audit generated commands against QEMU 10.0 removed and deprecated interfaces; use supported machine properties, explicit booleans, complete CPU topology, QMP commands, and PCI VFIO devices.
+
+### Stability and lifecycle
+- Request orderly guest shutdown through a private QMP socket; a timed-out guest is left running unless `--force` is explicit.
+- Acquire the lifecycle lock before preparing TAP, TPM, VirtIO-FS, or VFIO resources.
+- Preserve timestamped QEMU stderr logs and keep `error.log` as the latest-run link.
+- Keep Rust virtiofsd compatible by using its supported request queue with a bounded worker thread pool instead of unsupported multi-request-queue negotiation.
+- Map the `sata` disk setting to q35's supported AHCI/IDE frontend instead of the rejected legacy `-drive if=sata` spelling.
+- Replace the deprecated NVMe `num_queues` property with its QEMU 10-supported `max_ioqpairs` replacement.
+
+### Performance and UX
+- Add balanced/performance profiles, host diagnostics, and a side-effect-free `start --dry-run` command preview.
+- Honor memory preallocation when VirtIO-FS also requires shared memfd memory, with locked memory in the performance profile.
+- Use explicit CPU topology, conditional AMD AVIC, bounded VirtIO queues, and a parallel VirtIO-FS daemon thread pool.
+- Add effective runtime details to `status` and avoid requiring QEMU tools for unrelated inspection commands.
+
 ## [4.2.3] - 2026-07-15
 ### Security and reliability
 - Validate VM names before installing lifecycle traps or constructing cleanup paths.

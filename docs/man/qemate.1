@@ -1,4 +1,4 @@
-.TH QEMATE 1 "July 15, 2026" "Qemate 4.2.3" "User Commands"
+.TH QEMATE 1 "July 17, 2026" "Qemate 4.3.0" "User Commands"
 .SH NAME
 qemate \- Hardened QEMU virtual machine manager for Linux
 .SH SYNOPSIS
@@ -12,6 +12,8 @@ qemate \- Hardened QEMU virtual machine manager for Linux
 .SH DESCRIPTION
 .B Qemate
 is a streamlined command-line utility for managing QEMU virtual machines (VMs). It simplifies VM creation, control, and configuration, leveraging QEMU with KVM acceleration for enhanced performance when supported by the host system.
+
+QEMU 10.0 or newer is required. Commands that create or resize images or launch a VM reject older QEMU tool versions.
 
 All commands are top-level with hyphenated names. There are no subcommand groups.
 
@@ -54,6 +56,9 @@ Enable SPICE display server (default port: 5930).
 .TP
 .B --share-backend auto|virtfs|smb|virtiofs
 Select the shared folder backend.
+.TP
+.B --profile balanced|performance
+Select the portable balanced policy (default) or opt in to preallocated, locked memory and tuned VirtIO queues. New performance-profile Windows VMs use VirtIO block and require its storage driver during installation.
 .RE
 
 .TP
@@ -72,11 +77,14 @@ Attach a secondary ISO (e.g., VirtIO-Win drivers for Windows guests).
 .TP
 .B --debug
 Print the full generated QEMU command to stderr before launching.
+.TP
+.B --dry-run
+Print the shell-escaped effective QEMU command without binding host devices, creating TAP interfaces, or starting helper daemons.
 .RE
 
 .TP
-.B stop NAME [--force]
-Stop a VM gracefully (SIGTERM + 30\(ens timeout). \fB--force\fR sends SIGKILL immediately.
+.B stop NAME [--timeout SECONDS] [--force]
+Request an orderly guest ACPI shutdown through QMP and wait up to 60 seconds by default. If the guest does not stop, it is left running. \fB--force\fR sends SIGKILL immediately.
 
 .TP
 .B delete NAME [--force]
@@ -99,6 +107,14 @@ Display detailed VM configuration and runtime status, including CPU, memory, dis
 .TQ
 .B config NAME
 Open the VM config file directly in \fB$EDITOR\fR (falls back to \fBnano\fR). After editing, the config is validated against the Qemate schema; if validation fails, the previous config is automatically restored. The VM must be stopped before configuring.
+
+.TP
+.B tune NAME balanced|performance
+Change the VM runtime performance policy without replacing custom disk, network, passthrough, or shared-folder settings. The VM must be stopped.
+
+.TP
+.B doctor [NAME]
+Report host KVM, QMP client, AVIC, vhost-net, and memlock readiness. With a VM name, also show effective storage, memory, and shared-folder choices.
 
 .SS Port Forwarding
 .TP
@@ -198,7 +214,10 @@ Primary QCOW2 disk image. Absent when \fB--disk-dev\fR is used.
 General execution log.
 .TP
 .I ~/QVMs/VM_NAME/logs/error.log
-Direct stderr output from the QEMU process.
+Symlink to the latest timestamped QEMU stderr log.
+.TP
+.I ~/QVMs/VM_NAME/logs/qemu-YYYYMMDD-HHMMSS.log
+Timestamped stderr output from one QEMU run.
 .TP
 .I ~/QVMs/VM_NAME/logs/virtiofsd_TAG.log
 Per-share virtiofsd daemon log (one per shared folder when using the virtiofs backend).

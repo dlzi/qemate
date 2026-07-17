@@ -10,6 +10,9 @@ Qemate is a streamlined command-line utility for managing QEMU virtual machines 
   - **Ownership Verification**: Enforces strict file permissions and user-ownership checks for VM configurations.
   - **Locking**: Lock/unlock VMs to prevent accidental modifications or deletion.
 - **Pre-flight Validation**: Centralized dependency checking ensures all required host binaries (`swtpm`, `virtiofsd`, etc.) are present before a VM attempts to start.
+- **Safe Lifecycle Control**: Per-VM lifecycle locking and QMP-based ACPI shutdown prevent overlapping starts and surprise hard power-offs.
+- **Performance Profiles**: Portable balanced defaults plus an opt-in performance profile with preallocated, locked memory and tuned VirtIO queues.
+- **Diagnostics**: `doctor` and `start --dry-run` expose host readiness and the effective QEMU command without launching a VM.
 - **Networking**: Configure network types (`user`, `passt`, `tap`, `none`), network models (`virtio-net-pci`, `e1000`), and port forwarding with TCP/UDP support.
 - **Audio Support**: Enable PCIe passthrough to expose a host audio device directly to the guest via VFIO.
 - **Performance**: Optimized defaults for Linux and Windows VMs, with KVM acceleration and full VirtIO support.
@@ -22,7 +25,8 @@ Qemate is a streamlined command-line utility for managing QEMU virtual machines 
 ## Requirements
 
 - **Bash**: Version 5.0 or higher.
-- **QEMU**: `qemu-system-x86_64` and `qemu-img` (version 9.0 or higher).
+- **QEMU**: `qemu-system-x86_64` and `qemu-img` (version 10.0 or higher).
+- **OpenBSD netcat**: `nc` with Unix-socket support (`nc -U`) for QMP lifecycle control.
 - **Optional**:
   - **swtpm** and **swtpm-tools**: TPM 2.0 emulation.
   - **virtiofsd**: High-performance VirtIO-FS shared folders.
@@ -90,12 +94,13 @@ Qemate uses the syntax: `qemate <command> [vm] [options]`.
   - `--uefi` / `--no-uefi` — UEFI firmware (default: on for Windows, off for Linux)
   - `--spice` / `--no-spice` — SPICE display
   - `--share-backend auto|virtfs|smb|virtiofs`
+  - `--profile balanced|performance` — defaults to `balanced`; performance favors low latency and throughput
 
-- `qemate start <n> [--headless] [--iso PATH] [--virtio-iso PATH] [--debug]`
-  Starts a VM, optionally in headless mode, with a primary ISO, and/or a secondary ISO (e.g. VirtIO-Win drivers). `--debug` prints the full QEMU command before launch.
+- `qemate start <n> [--headless] [--iso PATH] [--virtio-iso PATH] [--debug] [--dry-run]`
+  Starts a VM, optionally in headless mode, with a primary ISO, and/or a secondary ISO (e.g. VirtIO-Win drivers). `--debug` prints the shell-escaped QEMU command before launch; `--dry-run` prints it without binding devices or starting helpers.
 
-- `qemate stop <n> [--force]`
-  Stops a VM gracefully (SIGTERM + 30s timeout) or forcefully (SIGKILL).
+- `qemate stop <n> [--timeout SECONDS] [--force]`
+  Requests an orderly ACPI shutdown through QMP and waits 60 seconds by default. A guest that ignores the request is left running; `--force` is the explicit hard-power-off path.
 
 - `qemate delete <n> [--force]`
   Deletes a VM and all its data. Prompts for confirmation unless `--force` is used. Locked VMs require `--force`.
@@ -108,6 +113,12 @@ Qemate uses the syntax: `qemate <command> [vm] [options]`.
 
 - `qemate status <n>`
   Displays detailed VM configuration and runtime status, including CPU, memory, disk, network, UEFI state, share backend, port forwards, USB passthrough, and shared folders.
+
+- `qemate tune <n> balanced|performance`
+  Changes the runtime performance policy without replacing custom disk, network, passthrough, or share settings. The VM must be stopped.
+
+- `qemate doctor [<n>]`
+  Reports host KVM/QMP/AVIC/vhost/memlock readiness and, when a VM is supplied, its effective storage, memory, and share choices.
 
 - `qemate configure <n>`
   Opens the VM config file directly in `$EDITOR`. After editing, the config is validated against the Qemate schema; if validation fails, the previous config is automatically restored. The VM must be stopped before configuring.
@@ -145,7 +156,22 @@ Qemate uses the syntax: `qemate <command> [vm] [options]`.
   | `SPICE_ENABLED`        | Enable SPICE display (`0`/`1`)                          | `0`                      |
   | `SPICE_PORT`           | SPICE port (default: 5930)                              | `5930`                   |
   | `ENABLE_UEFI`          | Enable UEFI firmware (`0`/`1`)                          | `1`                      |
+  | `PERFORMANCE_PROFILE`  | Runtime policy (`balanced`, `performance`)              | `balanced`               |
+  | `HIDE_KVM`             | Hide the KVM signature for legacy compatibility (`0`/`1`)| `0`                     |
+  | `CPU_AFFINITY`         | Optional Linux CPU list for the whole QEMU process      | empty                    |
   | `LOCKED`               | VM lock state (`0`/`1`)                                 | `0`                      |
+
+### Performance Profiles
+
+`balanced` is the portable default. It preserves demand-allocated memory unless `MEMORY_PREALLOC=1` is set and keeps compatibility-oriented device choices.
+
+`performance` is opt-in. It preallocates and locks guest memory, enables AMD AVIC for Windows when the host confirms support, bounds VirtIO block queues to eight, and gives VirtIO-FS a larger request queue with a daemon thread pool of up to four workers. New Windows VMs created with this profile use VirtIO block and therefore need the VirtIO storage driver during installation. Existing VMs never have their disk interface changed by `tune`.
+
+Run `qemate doctor <name>` before tuning. `CPU_AFFINITY` is deliberately empty by default because reserving host cores is workload- and host-specific.
+
+### QEMU compatibility
+
+Qemate 4.3.0 requires QEMU 10.0 or newer and enforces that floor before image creation, resizing, or VM launch. Its generated x86 command line was audited against QEMU 10.0's [deprecated features](https://qemu.readthedocs.io/en/v10.0.3/about/deprecated.html) and [removed features](https://qemu.readthedocs.io/en/v10.0.3/about/removed-features.html). Qemate does not emit an option or device listed there; existing VM configs continue to use non-versioned `q35` so they follow the installed QEMU's current machine model.
 
 ### PCIe Audio Passthrough
 
@@ -302,7 +328,8 @@ qemate status myvm
 - **Disk Images**: `${HOME}/QVMs/<n>/disk.qcow2` (qcow2 format; absent when `--disk-dev` is used).
 - **Logs**:
   - General: `${HOME}/QVMs/<n>/logs/qemate.log`
-  - QEMU errors: `${HOME}/QVMs/<n>/logs/error.log`
+  - QEMU stderr: `${HOME}/QVMs/<n>/logs/qemu-YYYYMMDD-HHMMSS.log`
+  - Latest QEMU stderr: `${HOME}/QVMs/<n>/logs/error.log` (symlink)
   - virtiofsd (per share): `${HOME}/QVMs/<n>/logs/virtiofsd_<tag>.log`
 - **Logging Verbosity**: Set via `LOG_LEVEL` environment variable (DEBUG, INFO, WARNING, ERROR; default: INFO).
 - **Default Configurations**:
@@ -334,7 +361,7 @@ ls /sys/kernel/iommu_groups/
 sudo modprobe vfio vfio-pci
 ```
 
-**Host audio lost after VM crash**: If the VM crashes without a clean shutdown, the audio device may remain bound to `vfio-pci`. Qemate restores the original drivers automatically via an EXIT trap when `qemate start` exits — so if the process is still running, sending it SIGTERM is sufficient. If `qemate start` has already exited without restoring drivers (e.g. killed with SIGKILL), rebind manually:
+**Host audio lost after VM crash**: If the VM crashes without a clean shutdown, the audio device may remain bound to `vfio-pci`. Use `qemate stop <name>` so the guest receives an orderly shutdown request and the foreground supervisor can restore the device. Do not signal the supervisor directly except as a last resort. If the supervisor was killed with SIGKILL, rebind manually:
 ```bash
 echo "0000:01:00.1" | sudo tee /sys/bus/pci/drivers/vfio-pci/unbind
 echo "snd_hda_intel" | sudo tee /sys/bus/pci/devices/0000:01:00.1/driver_override
@@ -397,7 +424,8 @@ If a configuration file is owned by another user or has insecure global write pe
 ### Errors
 Check logs at:
 - `${HOME}/QVMs/<n>/logs/qemate.log` — General VM logs
-- `${HOME}/QVMs/<n>/logs/error.log` — QEMU errors
+- `${HOME}/QVMs/<n>/logs/error.log` — Latest QEMU stderr log
+- `${HOME}/QVMs/<n>/logs/qemu-YYYYMMDD-HHMMSS.log` — Per-run QEMU stderr history
 
 ## Contributing
 
