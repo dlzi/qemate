@@ -1,5 +1,5 @@
 #!/bin/bash
-# Qemate Installation Script
+# qemate Installation Script
 
 set -euo pipefail
 
@@ -26,8 +26,8 @@ if ! command -v qemu-img &> /dev/null; then
     exit 1
 fi
 
-if ! command -v flock &> /dev/null; then
-    echo "Error: flock not found. Please install util-linux."
+if ! command -v flock &> /dev/null || ! command -v setsid &> /dev/null; then
+    echo "Error: flock and setsid not found. Please install util-linux."
     exit 1
 fi
 
@@ -74,7 +74,7 @@ elif [[ -f "$PROJECT_ROOT/qemate.1" ]]; then
 fi
 
 # Print header
-echo "=== Qemate Installation ==="
+echo "=== qemate Installation ==="
 echo "Installing to:"
 echo "  Binary:      $BINDIR"
 echo "  Docs:        $DOCDIR"

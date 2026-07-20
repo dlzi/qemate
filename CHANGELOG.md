@@ -1,6 +1,12 @@
 # Changelog
 
-All notable changes to Qemate will be documented in this file.
+All notable changes to qemate will be documented in this file.
+
+## [4.4.0] - 2026-07-19
+### Lifecycle and UX
+- Add `start --detach`, an independent launch mode that returns after QEMU readiness while a detached supervisor retains lifecycle locking and cleanup responsibilities.
+- Preserve `--headless` as a display-only option and support combining it with `--detach`.
+- Confirm detached readiness with a live QMP query, cancel the exact supervisor on interruption or timeout, and clean the tracked QEMU child even when its PID file is invalid.
 
 ## [4.3.0] - 2026-07-17
 ### QEMU compatibility

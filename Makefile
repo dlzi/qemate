@@ -1,4 +1,4 @@
-# Qemate Makefile
+# qemate Makefile
 # Default installation paths
 PREFIX ?= /usr/local
 BINDIR ?= $(PREFIX)/bin
@@ -11,10 +11,10 @@ DOCS := $(wildcard README.md CHANGELOG.md LICENSE)
 
 # No build step needed for Bash scripts
 all:
-	@echo "Nothing to build. Use 'make install' to install Qemate."
+	@echo "Nothing to build. Use 'make install' to install qemate."
 
 install:
-	@echo "Installing Qemate..."
+	@echo "Installing qemate..."
 	@test -f $(SCRIPT_SRC) || { echo "qemate.sh not found"; exit 1; }
 	@install -d $(DESTDIR)$(BINDIR)
 	@install -d $(DESTDIR)$(DOCDIR)
@@ -25,7 +25,7 @@ install:
 	@echo "Installation complete!"
 
 uninstall:
-	@echo "Uninstalling Qemate..."
+	@echo "Uninstalling qemate..."
 	@rm -f $(DESTDIR)$(BINDIR)/qemate
 	@rm -f $(DESTDIR)$(MANDIR)/qemate.1
 	@rm -rf $(DESTDIR)$(DOCDIR)

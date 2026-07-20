@@ -1,4 +1,4 @@
-.TH QEMATE 1 "July 17, 2026" "Qemate 4.3.0" "User Commands"
+.TH QEMATE 1 "July 19, 2026" "qemate 4.4.0" "User Commands"
 .SH NAME
 qemate \- Hardened QEMU virtual machine manager for Linux
 .SH SYNOPSIS
@@ -69,6 +69,9 @@ Start a VM.
 .B --headless
 Start without a graphical console.
 .TP
+.B --detach
+Return after QEMU is ready and keep a detached qemate supervisor responsible for lifecycle cleanup. This is independent of \fB--headless\fR. The process cannot later be returned to the original shell with \fBfg\fR; use qemate status/stop and reconnect through a configured display service when needed.
+.TP
 .B --iso PATH
 Attach a primary ISO image for installation.
 .TP
@@ -76,10 +79,10 @@ Attach a primary ISO image for installation.
 Attach a secondary ISO (e.g., VirtIO-Win drivers for Windows guests).
 .TP
 .B --debug
-Print the full generated QEMU command to stderr before launching.
+Print the full generated QEMU command to stderr before a foreground launch. For a detached launch, relay it to the caller before returning success or failure.
 .TP
 .B --dry-run
-Print the shell-escaped effective QEMU command without binding host devices, creating TAP interfaces, or starting helper daemons.
+Print the shell-escaped effective QEMU command without binding host devices, creating TAP interfaces, or starting helper daemons. With \fB--detach\fR, also report the requested launch mode without spawning a supervisor.
 .RE
 
 .TP
@@ -106,7 +109,7 @@ Display detailed VM configuration and runtime status, including CPU, memory, dis
 .B configure NAME
 .TQ
 .B config NAME
-Open the VM config file directly in \fB$EDITOR\fR (falls back to \fBnano\fR). After editing, the config is validated against the Qemate schema; if validation fails, the previous config is automatically restored. The VM must be stopped before configuring.
+Open the VM config file directly in \fB$EDITOR\fR (falls back to \fBnano\fR). After editing, the config is validated against the qemate schema; if validation fails, the previous config is automatically restored. The VM must be stopped before configuring.
 
 .TP
 .B tune NAME balanced|performance

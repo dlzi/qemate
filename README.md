@@ -1,4 +1,4 @@
-# Qemate — QEMU Virtual Machine Manager
+# qemate — QEMU Virtual Machine Manager
 
 Qemate is a streamlined command-line utility for managing QEMU virtual machines (VMs). It simplifies VM creation, control, and configuration, leveraging QEMU with KVM acceleration for enhanced performance when supported by the host system.
 
@@ -11,6 +11,7 @@ Qemate is a streamlined command-line utility for managing QEMU virtual machines 
   - **Locking**: Lock/unlock VMs to prevent accidental modifications or deletion.
 - **Pre-flight Validation**: Centralized dependency checking ensures all required host binaries (`swtpm`, `virtiofsd`, etc.) are present before a VM attempts to start.
 - **Safe Lifecycle Control**: Per-VM lifecycle locking and QMP-based ACPI shutdown prevent overlapping starts and surprise hard power-offs.
+- **Detached Operation**: `start --detach` returns after QEMU is ready while a private supervisor preserves lifecycle cleanup.
 - **Performance Profiles**: Portable balanced defaults plus an opt-in performance profile with preallocated, locked memory and tuned VirtIO queues.
 - **Diagnostics**: `doctor` and `start --dry-run` expose host readiness and the effective QEMU command without launching a VM.
 - **Networking**: Configure network types (`user`, `passt`, `tap`, `none`), network models (`virtio-net-pci`, `e1000`), and port forwarding with TCP/UDP support.
@@ -26,6 +27,7 @@ Qemate is a streamlined command-line utility for managing QEMU virtual machines 
 
 - **Bash**: Version 5.0 or higher.
 - **QEMU**: `qemu-system-x86_64` and `qemu-img` (version 10.0 or higher).
+- **util-linux**: `flock` for lifecycle locking and `setsid` for detached starts.
 - **OpenBSD netcat**: `nc` with Unix-socket support (`nc -U`) for QMP lifecycle control.
 - **Optional**:
   - **swtpm** and **swtpm-tools**: TPM 2.0 emulation.
@@ -96,8 +98,8 @@ Qemate uses the syntax: `qemate <command> [vm] [options]`.
   - `--share-backend auto|virtfs|smb|virtiofs`
   - `--profile balanced|performance` — defaults to `balanced`; performance favors low latency and throughput
 
-- `qemate start <n> [--headless] [--iso PATH] [--virtio-iso PATH] [--debug] [--dry-run]`
-  Starts a VM, optionally in headless mode, with a primary ISO, and/or a secondary ISO (e.g. VirtIO-Win drivers). `--debug` prints the shell-escaped QEMU command before launch; `--dry-run` prints it without binding devices or starting helpers.
+- `qemate start <n> [--headless] [--detach] [--iso PATH] [--virtio-iso PATH] [--debug] [--dry-run]`
+  Starts a VM, optionally without a graphical console (`--headless`) or under a detached lifecycle supervisor (`--detach`), with a primary ISO and/or a secondary ISO (e.g. VirtIO-Win drivers). `--debug` prints the shell-escaped QEMU command before a foreground launch and relays it before a detached caller returns; `--dry-run` prints it without binding devices or starting helpers.
 
 - `qemate stop <n> [--timeout SECONDS] [--force]`
   Requests an orderly ACPI shutdown through QMP and waits 60 seconds by default. A guest that ignores the request is left running; `--force` is the explicit hard-power-off path.
@@ -121,7 +123,7 @@ Qemate uses the syntax: `qemate <command> [vm] [options]`.
   Reports host KVM/QMP/AVIC/vhost/memlock readiness and, when a VM is supplied, its effective storage, memory, and share choices.
 
 - `qemate configure <n>`
-  Opens the VM config file directly in `$EDITOR`. After editing, the config is validated against the Qemate schema; if validation fails, the previous config is automatically restored. The VM must be stopped before configuring.
+  Opens the VM config file directly in `$EDITOR`. After editing, the config is validated against the qemate schema; if validation fails, the previous config is automatically restored. The VM must be stopped before configuring.
 
   The config file uses a simple `KEY="value"` format. Recognized keys:
 
@@ -171,7 +173,7 @@ Run `qemate doctor <name>` before tuning. `CPU_AFFINITY` is deliberately empty b
 
 ### QEMU compatibility
 
-Qemate 4.3.0 requires QEMU 10.0 or newer and enforces that floor before image creation, resizing, or VM launch. Its generated x86 command line was audited against QEMU 10.0's [deprecated features](https://qemu.readthedocs.io/en/v10.0.3/about/deprecated.html) and [removed features](https://qemu.readthedocs.io/en/v10.0.3/about/removed-features.html). Qemate does not emit an option or device listed there; existing VM configs continue to use non-versioned `q35` so they follow the installed QEMU's current machine model.
+Qemate 4.4.0 requires QEMU 10.0 or newer and enforces that floor before image creation, resizing, or VM launch. Its generated x86 command line was audited against QEMU 10.0's [deprecated features](https://qemu.readthedocs.io/en/v10.0.3/about/deprecated.html) and [removed features](https://qemu.readthedocs.io/en/v10.0.3/about/removed-features.html). Qemate does not emit an option or device listed there; existing VM configs continue to use non-versioned `q35` so they follow the installed QEMU's current machine model.
 
 ### PCIe Audio Passthrough
 
@@ -273,6 +275,18 @@ Start a VM in headless mode:
 ```bash
 qemate start myvm --headless
 ```
+
+Start a VM without keeping the terminal occupied:
+```bash
+qemate start myvm --detach
+```
+
+Detached and headless operation are independent and can be combined:
+```bash
+qemate start myvm --headless --detach
+```
+
+Detached VMs remain managed through `qemate status` and `qemate stop`. They cannot be returned to the original shell with `fg`; reconnect to a configured SPICE display when graphical access is needed.
 
 Stop a VM forcefully:
 ```bash
@@ -419,7 +433,7 @@ ss -tuln | grep :PORT
 Privileged ports (≤1024) may require root privileges.
 
 ### Security Violations
-If a configuration file is owned by another user or has insecure global write permissions, Qemate will abort or automatically harden the permissions to `600`.
+If a configuration file is owned by another user or has insecure global write permissions, qemate will abort or automatically harden the permissions to `600`.
 
 ### Errors
 Check logs at:

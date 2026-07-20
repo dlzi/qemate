@@ -2,7 +2,7 @@
 # =============================================================================
 # qemate — Streamlined QEMU Virtual Machine Management Utility
 #
-# VERSION:  4.3.0
+# VERSION:  4.4.0
 # LICENSE:  MIT
 # =============================================================================
 
@@ -21,12 +21,13 @@ umask 0077
 # CONSTANTS & DEFAULTS
 # =============================================================================
 
-readonly VERSION="4.3.0"
+readonly VERSION="4.4.0"
 readonly MIN_QEMU_MAJOR=10
 readonly MIN_QEMU_VERSION="10.0"
 readonly VM_DIR="${QEMATE_VM_DIR:-$HOME/QVMs}"
 readonly LOG_LEVEL="${LOG_LEVEL:-INFO}"
 readonly DEFAULT_STOP_TIMEOUT=60
+readonly DETACH_START_TIMEOUT=30
 
 # Shared defaults for all OS types.
 declare -A _BASE_DEFAULTS=(
@@ -77,6 +78,18 @@ declare -g QEMATE_CLEANUP_DONE=0
 declare -g QEMATE_LOCK_FD=""
 declare -g QEMATE_LOCK_FILE=""
 declare -g QEMATE_SUPPRESS_FILE_LOG=0
+declare -g QEMATE_DETACH_STATUS_FILE=""
+declare -g QEMATE_DETACH_READY=0
+declare -g QEMATE_QEMU_JOB_PID=""
+declare -g QEMATE_DETACH_LAUNCH_STATUS_FILE=""
+declare -g QEMATE_DETACH_SUPERVISOR_PID=""
+
+write_detach_status() {
+    [[ -n "$QEMATE_DETACH_STATUS_FILE" ]] || return 0
+    local state="$1" value="${2:-}" tmp="${QEMATE_DETACH_STATUS_FILE}.tmp.${BASHPID}"
+    printf '%s\t%s\n' "$state" "$value" > "$tmp"
+    mv -f "$tmp" "$QEMATE_DETACH_STATUS_FILE"
+}
 
 vm_pid_matches() {
     local vm_name="$1" pid="$2"
@@ -110,10 +123,14 @@ cleanup_active_vm() {
         QEMATE_CLEANUP_DONE=1
 
         log_message "DEBUG" "Cleaning up: $QEMATE_ACTIVE_VM"
-        local pidfile="$VM_DIR/$QEMATE_ACTIVE_VM/qemu.pid" pid=""
+        local pidfile="$VM_DIR/$QEMATE_ACTIVE_VM/qemu.pid" pid="" tracked_pid=""
+        if [[ -n "$QEMATE_QEMU_JOB_PID" ]] && vm_pid_matches "$QEMATE_ACTIVE_VM" "$QEMATE_QEMU_JOB_PID"; then
+            tracked_pid="$QEMATE_QEMU_JOB_PID"
+            kill "$tracked_pid" 2>/dev/null || true
+        fi
         if [[ -f "$pidfile" ]]; then
             read -r pid < "$pidfile" || true
-            if vm_pid_matches "$QEMATE_ACTIVE_VM" "$pid"; then
+            if [[ "$pid" != "$tracked_pid" ]] && vm_pid_matches "$QEMATE_ACTIVE_VM" "$pid"; then
                 kill "$pid" 2>/dev/null || true
             fi
             [[ "$(< "$pidfile")" == "$pid" ]] && rm -f "$pidfile"
@@ -131,14 +148,52 @@ cleanup_active_vm() {
     fi
 }
 
+cleanup_start_exit() {
+    local exit_code=$?
+    if [[ -n "$QEMATE_DETACH_STATUS_FILE" && "$QEMATE_DETACH_READY" -eq 0 ]]; then
+        write_detach_status "FAILED" "$exit_code" 2>/dev/null || true
+    fi
+    cleanup_active_vm
+}
+
 # Clean up orphaned daemons and lock files when interrupted during launch.
 cleanup_on_signal() {
-    local exit_code=$?
+    local exit_code="$1"
     cleanup_active_vm
     exit "$exit_code"
 }
 
-trap cleanup_on_signal INT TERM
+trap 'cleanup_on_signal 130' INT
+trap 'cleanup_on_signal 143' TERM
+
+terminate_detached_supervisor() {
+    local pid="$QEMATE_DETACH_SUPERVISOR_PID" status_file="$QEMATE_DETACH_LAUNCH_STATUS_FILE" i
+    if [[ -z "$pid" && -n "$status_file" ]]; then
+        local state="" value=""
+        for (( i=0; i<20; i++ )); do
+            if IFS=$'\t' read -r state value < "$status_file" 2>/dev/null && [[ "$state" == "STARTING" ]]; then
+                pid="$value"
+                QEMATE_DETACH_SUPERVISOR_PID="$pid"
+                break
+            fi
+            sleep 0.05
+        done
+    fi
+    if [[ -n "$pid" && -n "$status_file" ]] && pid_cmdline_contains "$pid" "$status_file"; then
+        kill "$pid" 2>/dev/null || true
+        for (( i=0; i<50; i++ )); do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 0.1
+        done
+    fi
+}
+
+cancel_detached_launch() {
+    local exit_code="$1" status_file="$QEMATE_DETACH_LAUNCH_STATUS_FILE"
+    terminate_detached_supervisor
+    [[ -z "$status_file" ]] || rm -f "$status_file"
+    exit "$exit_code"
+}
 
 # =============================================================================
 # LOGGING
@@ -353,6 +408,25 @@ validate_performance_memory() {
 
 have_unix_nc() {
     command -v nc >/dev/null 2>&1 && nc -h 2>&1 | grep -q -- '-U'
+}
+
+qmp_is_ready() {
+    local vm_name="$1" socket="$VM_DIR/$1/sockets/qmp.sock"
+    [[ -S "$socket" ]] && have_unix_nc || return 1
+
+    local response compact
+    response=$(
+        {
+            printf '%s\n' '{"execute":"qmp_capabilities","id":"capabilities"}'
+            printf '%s\n' '{"execute":"query-status","id":"ready"}'
+            sleep 0.05
+        } | timeout 1 nc -U -N "$socket" 2>/dev/null
+    ) || return 1
+    compact="${response//[[:space:]]/}"
+    [[ "$compact" != *'"error"'* &&
+       "$compact" == *'"id":"capabilities"'* &&
+       "$compact" == *'"id":"ready"'* &&
+       "$compact" == *'"status":'* ]]
 }
 
 qmp_command() {
@@ -2023,22 +2097,123 @@ create() {
     log_message "INFO" "VM '$vm_name' created (OS: $os_type | Mem: ${VM[MEMORY]} | Cores: ${VM[CORES]} | Disk: ${disk_info})" "$vm_name"
 }
 
+start_detached() {
+    local vm_name="$1" debug="$2"; shift 2
+    local -a start_args=("$@")
+
+    require_commands setsid || return 1
+    require_vm "$vm_name" exists not-running || return 1
+
+    local self_path status_file supervisor_log log_stamp
+    self_path=$(realpath "${BASH_SOURCE[0]}")
+    status_file=$(mktemp "$VM_DIR/$vm_name/.detach-start.XXXXXX.status")
+    printf -v log_stamp '%(%Y%m%d-%H%M%S)T' -1
+    supervisor_log=$(mktemp "$VM_DIR/$vm_name/logs/supervisor-${log_stamp}.XXXXXX.log")
+    QEMATE_DETACH_LAUNCH_STATUS_FILE="$status_file"
+    QEMATE_DETACH_SUPERVISOR_PID=""
+    trap 'cancel_detached_launch 130' INT
+    trap 'cancel_detached_launch 143' TERM
+
+    log_message "INFO" "Starting VM in detached mode: $vm_name" "$vm_name"
+    if ! setsid --fork env QEMATE_INTERNAL_DETACH=1 \
+        "$self_path" start "$vm_name" "${start_args[@]}" --_detach-status "$status_file" \
+        </dev/null >"$supervisor_log" 2>&1; then
+        rm -f "$status_file"
+        QEMATE_DETACH_LAUNCH_STATUS_FILE=""
+        trap 'cleanup_on_signal 130' INT
+        trap 'cleanup_on_signal 143' TERM
+        log_message "ERROR" "Failed to launch detached supervisor for: $vm_name" "$vm_name"
+        return 1
+    fi
+
+    local state="" value="" supervisor_pid="" i
+    for (( i=0; i<DETACH_START_TIMEOUT * 10; i++ )); do
+        if IFS=$'\t' read -r state value < "$status_file" && [[ -n "$state" ]]; then
+            if [[ "$state" == "STARTING" ]]; then
+                supervisor_pid="$value"
+                QEMATE_DETACH_SUPERVISOR_PID="$value"
+            fi
+            if [[ "$state" == "READY" ]]; then
+                if [[ "$debug" == "1" ]]; then
+                    sed -n '/^\[DEBUG\] Generated QEMU command:/,/^$/p' "$supervisor_log" >&2
+                fi
+                rm -f "$status_file"
+                QEMATE_DETACH_LAUNCH_STATUS_FILE=""
+                QEMATE_DETACH_SUPERVISOR_PID=""
+                trap 'cleanup_on_signal 130' INT
+                trap 'cleanup_on_signal 143' TERM
+                log_message "INFO" "VM $vm_name started in detached mode (PID: $value)." "$vm_name"
+                log_message "INFO" "Supervisor log: $supervisor_log" "$vm_name"
+                return 0
+            fi
+            if [[ "$state" == "FAILED" ]]; then
+                if [[ "$debug" == "1" ]]; then
+                    sed -n '/^\[DEBUG\] Generated QEMU command:/,/^$/p' "$supervisor_log" >&2
+                fi
+                rm -f "$status_file"
+                QEMATE_DETACH_LAUNCH_STATUS_FILE=""
+                QEMATE_DETACH_SUPERVISOR_PID=""
+                trap 'cleanup_on_signal 130' INT
+                trap 'cleanup_on_signal 143' TERM
+                log_message "ERROR" "Detached start failed (exit: ${value:-1}). Check $supervisor_log" "$vm_name"
+                return 1
+            fi
+        fi
+        sleep 0.1
+    done
+
+    QEMATE_DETACH_SUPERVISOR_PID="$supervisor_pid"
+    terminate_detached_supervisor
+    if [[ "$debug" == "1" ]]; then
+        sed -n '/^\[DEBUG\] Generated QEMU command:/,/^$/p' "$supervisor_log" >&2
+    fi
+    rm -f "$status_file"
+    QEMATE_DETACH_LAUNCH_STATUS_FILE=""
+    QEMATE_DETACH_SUPERVISOR_PID=""
+    trap 'cleanup_on_signal 130' INT
+    trap 'cleanup_on_signal 143' TERM
+    log_message "ERROR" "Detached start timed out after ${DETACH_START_TIMEOUT}s. Check $supervisor_log" "$vm_name"
+    return 1
+}
+
 start() {
-    require_qemu_version qemu-system-x86_64 || return 1
     local vm_name="$1"; shift
-    local headless="0" iso_file="" virtio_iso="" debug="0" dry_run="0"
+    local headless="0" detach="0" iso_file="" virtio_iso="" debug="0" dry_run="0"
+    local internal_detach="${QEMATE_INTERNAL_DETACH:-0}"
 
     # Parse options
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --headless) headless="1"; shift ;;
+            --detach)   detach="1"; shift ;;
             --iso)      [[ $# -ge 2 && "$2" != --* ]] || { log_message "ERROR" "--iso requires a path"; return 1; }; iso_file="$2"; shift 2 ;;
             --virtio-iso) [[ $# -ge 2 && "$2" != --* ]] || { log_message "ERROR" "--virtio-iso requires a path"; return 1; }; virtio_iso="$2"; shift 2 ;;
             --debug)    debug="1"; shift ;;
             --dry-run)  dry_run="1"; shift ;;
+            --_detach-status)
+                [[ "$internal_detach" == "1" && $# -ge 2 ]] || { log_message "ERROR" "Unknown option: $1"; return 1; }
+                QEMATE_DETACH_STATUS_FILE="$2"; shift 2 ;;
             *) log_message "ERROR" "Unknown option: $1"; return 1 ;;
         esac
     done
+
+    if [[ "$internal_detach" == "1" ]]; then
+        [[ -n "$QEMATE_DETACH_STATUS_FILE" ]] || { log_message "ERROR" "Detached supervisor status file is missing"; return 1; }
+        trap cleanup_start_exit EXIT
+        write_detach_status "STARTING" "$BASHPID"
+    fi
+
+    require_qemu_version qemu-system-x86_64 || return 1
+
+    if [[ "$detach" == "1" && "$internal_detach" != "1" && "$dry_run" != "1" ]]; then
+        local -a detached_args=()
+        [[ "$headless" == "1" ]] && detached_args+=(--headless)
+        [[ -n "$iso_file" ]] && detached_args+=(--iso "$iso_file")
+        [[ -n "$virtio_iso" ]] && detached_args+=(--virtio-iso "$virtio_iso")
+        [[ "$debug" == "1" ]] && detached_args+=(--debug)
+        start_detached "$vm_name" "$debug" "${detached_args[@]}"
+        return $?
+    fi
 
     # A dry run must not change VM state, including its command log.
     [[ "$dry_run" == "1" ]] && QEMATE_SUPPRESS_FILE_LOG=1
@@ -2054,7 +2229,7 @@ start() {
         QEMATE_ACTIVE_VM="$vm_name"
         QEMATE_PHASE="starting"
         QEMATE_CLEANUP_DONE=0
-        trap cleanup_active_vm EXIT
+        trap cleanup_start_exit EXIT
 
         stop_virtiofsd_daemons "$vm_name"
         stop_tpm "$vm_name"
@@ -2137,6 +2312,7 @@ start() {
         printf '\n[DEBUG] Generated QEMU command:\n' >&2
         printf '%q ' "${launch_cmd[@]}" >&2
         printf '\n\n' >&2
+        [[ "$detach" == "1" ]] && printf '[DEBUG] Launch mode: detached\n\n' >&2
     fi
     [[ "$dry_run" == "1" ]] && return 0
 
@@ -2151,7 +2327,32 @@ start() {
         mv "$VM_DIR/$vm_name/logs/error.log" "$VM_DIR/$vm_name/logs/qemu-legacy-${log_stamp}.log"
     fi
     ln -sfn "${qemu_log##*/}" "$VM_DIR/$vm_name/logs/error.log"
-    "${launch_cmd[@]}" {QEMATE_LOCK_FD}>&- 2>"$qemu_log" || qemu_status=$?
+    if [[ "$internal_detach" == "1" ]]; then
+        "${launch_cmd[@]}" {QEMATE_LOCK_FD}>&- 2>"$qemu_log" &
+        local qemu_job_pid=$! qemu_pid="" ready="0" i
+        QEMATE_QEMU_JOB_PID="$qemu_job_pid"
+        for (( i=0; i<DETACH_START_TIMEOUT * 10; i++ )); do
+            if [[ -f "$VM_DIR/$vm_name/qemu.pid" ]]; then
+                read -r qemu_pid < "$VM_DIR/$vm_name/qemu.pid" || true
+                if vm_pid_matches "$vm_name" "$qemu_pid" && qmp_is_ready "$vm_name"; then
+                    ready="1"
+                    break
+                fi
+            fi
+            kill -0 "$qemu_job_pid" 2>/dev/null || break
+            sleep 0.1
+        done
+        if [[ "$ready" != "1" ]]; then
+            if wait "$qemu_job_pid"; then qemu_status=1; else qemu_status=$?; fi
+            log_message "ERROR" "QEMU did not become ready for detached operation. Check $qemu_log" "$vm_name" || true
+            return "$qemu_status"
+        fi
+        write_detach_status "READY" "$qemu_pid"
+        QEMATE_DETACH_READY=1
+        if wait "$qemu_job_pid"; then qemu_status=0; else qemu_status=$?; fi
+    else
+        "${launch_cmd[@]}" {QEMATE_LOCK_FD}>&- 2>"$qemu_log" || qemu_status=$?
+    fi
 
     log_message "INFO" "QEMU process terminated (exit: $qemu_status)" "$vm_name"
 
@@ -2474,7 +2675,7 @@ doctor_qemu_command() {
 
 doctor() {
     local vm_name="${1:-}" failures=0
-    echo "Qemate host diagnostics"
+    echo "qemate host diagnostics"
     echo "────────────────────────────────────────────────────────"
 
     doctor_qemu_command qemu-system-x86_64 || failures=1
@@ -2526,7 +2727,7 @@ doctor() {
 
 display_help() {
     cat <<EOF
-QEMATE v${VERSION} — QEMU VM Manager
+qemate v${VERSION} — QEMU VM Manager
 ────────────────────────────────────────────────────────────────────────
 
 USAGE
@@ -2546,7 +2747,7 @@ VM
       --share-backend auto|virtfs|smb|virtiofs
       --profile balanced|performance
 
-  start   <name> [--headless] [--iso PATH] [--virtio-iso PATH] [--debug] [--dry-run]
+  start   <name> [--headless] [--detach] [--iso PATH] [--virtio-iso PATH] [--debug] [--dry-run]
   stop    <name> [--timeout SECONDS] [--force]
   delete  <name> [--force]
   resize  <name> <SIZE|+SIZE> [--force]   VM must be stopped; --force is reserved

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Qemate Uninstallation Script
+# qemate Uninstallation Script
 
 set -e
 
@@ -9,7 +9,7 @@ BINDIR="${BINDIR:-$PREFIX/bin}"
 DOCDIR="${DOCDIR:-$PREFIX/share/doc/qemate}"
 MANDIR="${MANDIR:-$PREFIX/share/man/man1}"
 
-# Check if Qemate is installed
+# Check if qemate is installed
 if [ ! -f "$BINDIR/qemate" ] && [ ! -d "$DOCDIR" ] && [ ! -f "$MANDIR/qemate.1" ]; then
     echo "Qemate does not appear to be installed in the specified paths."
     echo "Checked paths:"
@@ -20,7 +20,7 @@ if [ ! -f "$BINDIR/qemate" ] && [ ! -d "$DOCDIR" ] && [ ! -f "$MANDIR/qemate.1" 
 fi
 
 # Print header
-echo "=== Qemate Uninstallation ==="
+echo "=== qemate Uninstallation ==="
 echo "Removing from:"
 echo "  Binary:      $BINDIR"
 echo "  Docs:        $DOCDIR"

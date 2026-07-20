@@ -1,6 +1,6 @@
-# Contributing to Qemate
+# Contributing to qemate
 
-Thank you for your interest in contributing to Qemate! This document provides guidelines and instructions for contributing.
+Thank you for your interest in contributing to qemate! This document provides guidelines and instructions for contributing.
 
 ## Code of Conduct
 
@@ -44,4 +44,4 @@ Please update the documentation when necessary:
 
 ## License
 
-By contributing to Qemate, you agree that your contributions will be licensed under the project's MIT License.
+By contributing to qemate, you agree that your contributions will be licensed under the project's MIT License.
