@@ -1,4 +1,4 @@
-.TH QEMATE 1 "July 19, 2026" "qemate 4.4.0" "User Commands"
+.TH QEMATE 1 "September 5, 2026" "qemate 5.1.1" "User Commands"
 .SH NAME
 qemate \- Hardened QEMU virtual machine manager for Linux
 .SH SYNOPSIS
@@ -21,56 +21,56 @@ All commands are top-level with hyphenated names. There are no subcommand groups
 .SS VM Management
 .TP
 .B create NAME [OPTIONS]
-Create a new VM with optimized defaults for Linux or Windows.
+Create a new VM with optimized defaults for Linux, Windows, or macOS.
 .RS
 .TP
 .B --os-type TYPE
-OS preset (\fBlinux\fR|\fBwindows\fR; default: linux).
+OS preset (\fBlinux\fR|\fBwindows\fR|\fBmacos\fR; default: linux).
 .TP
 .B --memory SIZE
-Memory size (e.g., \fB4G\fR, \fB2048M\fR).
+Memory size (e.g., \fB4G\fR, \fB8G\fR, \fB2048M\fR). macOS defaults to 8G.
 .TP
 .B --cores N
 Number of CPU cores (1\(en64).
 .TP
 .B --disk-size SIZE
-Virtual disk size (e.g., \fB60G\fR). Creates a qcow2 image. Mutually exclusive with \fB--disk-dev\fR.
+Virtual disk size (e.g., \fB60G\fR). Creates a qcow2 image with metadata preallocation. Mutually exclusive with \fB--disk-dev\fR. Free space on the VM directory is checked before creation.
 .TP
 .B --disk-dev PATH
-Raw physical block device to use instead of a qcow2 image (e.g., \fB/dev/sdb\fR). \fB--disk-size\fR is ignored when this is set. Resize is not supported on physical-device VMs.
+Raw physical block device to use instead of a qcow2 image (e.g., \fB/dev/sdb\fR). \fB--disk-size\fR is ignored when this is set. Resize and \fBclone\fR are not supported on physical-device VMs.
 .TP
 .B --machine TYPE[,accel=kvm|tcg]
 Machine type (e.g., \fBq35,accel=kvm\fR).
 .TP
 .B --enable-audio / --no-audio
-Enable or disable PCIe audio passthrough. Requires \fBAUDIO_PASSTHROUGH_PCI\fR to be set in the VM config after creation.
+Enable guest audio. Without \fBAUDIO_PASSTHROUGH_PCI\fR this attaches emulated Intel HDA using QEMU's default host backend (PipeWire, PulseAudio, or ALSA). Set \fBAUDIO_PASSTHROUGH_PCI\fR in the VM config for VFIO PCIe passthrough instead. Detached VFIO starts require passwordless sudo.
 .TP
 .B --enable-tpm / --no-tpm
-Enable TPM 2.0 emulation (requires \fBswtpm\fR and \fBswtpm_setup\fR).
+Enable TPM 2.0 emulation (requires \fBswtpm\fR and \fBswtpm_setup\fR). Default: on for Windows, off for Linux.
 .TP
 .B --uefi / --no-uefi
 Enable or disable UEFI firmware (default: on for Windows, off for Linux). Requires \fBedk2-ovmf\fR.
 .TP
 .B --spice / --no-spice
-Enable SPICE display server (default port: 5930).
+Enable SPICE display server (default port: 5930). Start prints a \fBremote-viewer spice://127.0.0.1:PORT\fR connection hint.
 .TP
 .B --share-backend auto|virtfs|smb|virtiofs
 Select the shared folder backend.
 .TP
 .B --profile balanced|performance
-Select the portable balanced policy (default) or opt in to preallocated, locked memory and tuned VirtIO queues. New performance-profile Windows VMs use VirtIO block and require its storage driver during installation.
+Select the portable balanced policy (default) or opt in to preallocated, locked memory and tuned VirtIO queues. Hugepages are used when the pool has enough free pages (including with VirtIO-FS shared memory); otherwise qemate falls back to memfd or anonymous RAM. Creating with \fBperformance\fR validates available RAM and the process memlock limit. New performance-profile Windows VMs use VirtIO block and require its storage driver during installation.
 .RE
 
 .TP
 .B start NAME [OPTIONS]
-Start a VM.
+Start a VM. Log rotation runs automatically on each start.
 .RS
 .TP
 .B --headless
 Start without a graphical console.
 .TP
 .B --detach
-Return after QEMU is ready and keep a detached qemate supervisor responsible for lifecycle cleanup. This is independent of \fB--headless\fR. The process cannot later be returned to the original shell with \fBfg\fR; use qemate status/stop and reconnect through a configured display service when needed.
+Return after QEMU is ready and keep a detached qemate supervisor responsible for lifecycle cleanup. Independent of \fB--headless\fR, except when neither \fBDISPLAY\fR nor \fBWAYLAND_DISPLAY\fR is set: detached start then implies \fB--headless\fR so QEMU does not fail opening a GUI. The process cannot later be returned to the original shell with \fBfg\fR; use qemate status/stop and reconnect through a configured display service when needed. PCIe audio passthrough in this mode requires passwordless sudo (no TTY for interactive \fBsudo\fR).
 .TP
 .B --iso PATH
 Attach a primary ISO image for installation.
@@ -90,16 +90,44 @@ Print the shell-escaped effective QEMU command without binding host devices, cre
 Request an orderly guest ACPI shutdown through QMP and wait up to 60 seconds by default. If the guest does not stop, it is left running. \fB--force\fR sends SIGKILL immediately.
 
 .TP
+.B restart NAME [OPTIONS]
+Stop the VM if it is running, wait for lifecycle teardown, then start it again. Accepts the same options as \fBstop\fR (\fB--force\fR, \fB--timeout\fR) and \fBstart\fR (\fB--headless\fR, \fB--detach\fR, \fB--iso\fR, \fB--virtio-iso\fR, \fB--debug\fR, \fB--dry-run\fR).
+
+.TP
+.B wait NAME [--timeout SECONDS] [--state running|ready|stopped]
+Block until the VM reaches the requested state. Default state is \fBrunning\fR/\fBready\fR (QEMU process live and QMP responsive). Useful after \fBstart --detach\fR. Default timeout is 120 seconds.
+
+.TP
+.B console NAME [--qmp]
+Open an interactive QMP session on the VM Unix control socket (\fBsockets/qmp.sock\fR). The VM must be running. Requires OpenBSD netcat with Unix-socket support (\fBnc -U\fR).
+
+.TP
+.B logs NAME [-f|--follow] [-n|--lines N] [--qemate|--qemu|--supervisor]
+Show recent log lines for the VM. Default source is \fBqemate.log\fR. \fB--qemu\fR selects the latest QEMU stderr log; \fB--supervisor\fR selects the latest detached-supervisor log. \fB-f\fR follows like \fBtail -f\fR. Default line count is 80.
+
+.TP
+.B clone SRC DST [--full]
+Duplicate a stopped VM that uses a qcow2 disk image. Copies the config, assigns a new MAC address, and either:
+.RS
+.IP \(bu 2
+creates a \fBlinked\fR clone (default): a new qcow2 whose backing file is the source disk (fast, shares unchanged clusters). Deleting or shrinking the source disk breaks the clone; use \fB--full\fR for an independent copy, or
+.IP \(bu 2
+with \fB--full\fR: a standalone full copy of the disk.
+.RE
+.IP
+UEFI NVRAM and TPM state are copied when present. VMs that use a host block device (\fBDISK_DEV\fR / \fB--disk-dev\fR) cannot be cloned: there is no private image file to duplicate, and pointing two VMs at the same physical disk is unsafe. Create a second VM with its own \fB--disk-dev\fR path instead.
+
+.TP
 .B delete NAME [--force]
 Delete a VM and all its data. Prompts for confirmation unless \fB--force\fR is used. Locked VMs require \fB--force\fR.
 
 .TP
 .B resize NAME SIZE|+SIZE [--force]
-Resize the VM disk image (e.g., \fB80G\fR or \fB+20G\fR). The VM must be stopped. \fB--force\fR is accepted for CLI compatibility but does not allow live qcow2 resizing. Not supported for physical-device VMs (\fB--disk-dev\fR).
+Resize the VM disk image (e.g., \fB80G\fR or \fB+20G\fR). The VM must be stopped. \fB--force\fR is accepted for CLI compatibility but does not allow live qcow2 resizing. Not supported for physical-device VMs (\fB--disk-dev\fR). The config records exact GiB when the size is divisible by 1\ GiB; otherwise MiB.
 
 .TP
 .B list
-List all VMs with seven columns: NAME, STATUS, LOCKED, OS, AUDIO, TPM, SPICE.
+List all VMs with seven columns: NAME, STATUS, LOCKED, OS, AUDIO, TPM, SPICE. Uses a lightweight config read (no full validation lock per row).
 
 .TP
 .B status NAME
@@ -109,20 +137,41 @@ Display detailed VM configuration and runtime status, including CPU, memory, dis
 .B configure NAME
 .TQ
 .B config NAME
-Open the VM config file directly in \fB$EDITOR\fR (falls back to \fBnano\fR). After editing, the config is validated against the qemate schema; if validation fails, the previous config is automatically restored. The VM must be stopped before configuring.
+Open the VM config file in \fB$EDITOR\fR, falling back to \fBnano\fR, \fBvim\fR, or \fBvi\fR. After editing, the config is validated against the qemate schema; if validation fails, the previous config is automatically restored. The VM may be running; changes then apply on the next start. The VM must not be locked.
 
 .TP
 .B tune NAME balanced|performance
-Change the VM runtime performance policy without replacing custom disk, network, passthrough, or shared-folder settings. The VM must be stopped.
+Change only the runtime performance profile (\fBPERFORMANCE_PROFILE\fR) without replacing custom disk, network, passthrough, or shared-folder settings. The VM must be stopped. For full multi-field edits, use \fBconfigure\fR.
 
 .TP
 .B doctor [NAME]
-Report host KVM, QMP client, AVIC, vhost-net, and memlock readiness. With a VM name, also show effective storage, memory, and shared-folder choices.
+Report host KVM, QMP client, AVIC, vhost-net, and memlock readiness. With a VM name, also show effective storage, memory, shared-folder choices, and whether configured port forwards conflict with ports already bound on the host.
+
+.SS macOS
+.TP
+.B macos-install NAME [--version VERSION] [--no-start] [--refresh]
+Prepare an Apple recovery installer via kholia/OSX-KVM and start the VM by default. Uses a shared host OSX-KVM cache with a per-VM worktree (or local shared clone). Supported versions: high-sierra, mojave, catalina, big-sur, monterey, ventura, sonoma, sequoia, tahoe. Requires git, Python 3, and dmg2img. Use \fB--no-start\fR to prepare only.
+
+.TP
+.B macos-eject NAME
+Detach recovery media after installation so subsequent boots use the installed disk through OpenCore. Also removes the temporary OSX-KVM checkout and recovery download artefacts, keeping permanent OpenCore and 4 MiB OVMF assets under \fBmacos/assets/\fR.
+
+.TP
+.B macos-recovery NAME
+Re-attach recovery media for maintenance or reinstallation. Re-prepares media via \fBmacos-install\fR if it was cleaned up by eject.
+
+.TP
+.B macos-refresh NAME
+Update the shared OSX-KVM cache and the VM's checkout (worktree or local clone).
+
+.TP
+.B macos-doctor NAME
+Validate OpenCore/OVMF/recovery assets, the KVM \fBignore_msrs\fR requirement, and required QEMU macOS devices.
 
 .SS Port Forwarding
 .TP
 .B port-add NAME [IP:]HOST:GUEST[:tcp|udp]
-Add a port forwarding rule. Protocol defaults to \fBtcp\fR if omitted.
+Add a port forwarding rule. Protocol defaults to \fBtcp\fR if omitted. The host port is checked for conflicts when the rule is added (and again at start).
 
 .TP
 .B port-remove NAME [IP:]HOST:GUEST[:tcp|udp]
@@ -157,7 +206,7 @@ List all configured shared folders for the VM.
 .SS VM Protection
 .TP
 .B lock NAME
-Lock a VM to prevent modification or deletion.
+Lock a VM to prevent start, resize, configuration edits, and deletion (unless \fBdelete --force\fR). Stop and status still work.
 
 .TP
 .B unlock NAME
@@ -180,16 +229,16 @@ No network interface attached to the VM.
 .SH SHARED FOLDER BACKENDS
 .TP
 .B auto
-Picks the best available backend: virtiofs \(-> virtfs for Linux guests, smb for Windows guests.
+Picks the best available backend: virtiofs \(-> virtfs for Linux guests, smb for Windows and macOS guests.
 .TP
 .B virtfs
 9P filesystem. Linux guests only; no extra host dependencies.
 .TP
 .B virtiofs
-High-performance VirtIO-FS. Supports multiple simultaneous shared folders. Requires \fBvirtiofsd\fR. Windows guests also need WinFSP and the VirtIO-FS driver.
+High-performance VirtIO-FS. Supports multiple simultaneous shared folders. Requires \fBvirtiofsd\fR. Windows guests also need WinFSP and the VirtIO-FS driver. The performance profile enables additional daemon cache/writeback options when supported.
 .TP
 .B smb
-QEMU user-mode SMB share. Windows guests only; limited to one folder. Requires \fBsmbd\fR from Samba on the host and NETWORK_TYPE=user or nat.
+QEMU user-mode SMB share; limited to one folder. Requires \fBsmbd\fR from Samba on the host and NETWORK_TYPE=user or nat. Default for Windows and macOS when \fBauto\fR is selected.
 
 .SH SECURITY & CONCURRENCY
 Qemate implements strict \fBflock\fR-based locking on configuration files to prevent race conditions during simultaneous CLI commands. The script operates with a \fBumask 0077\fR to ensure all created files are accessible only by the owner. Config files are loaded via a strict regex-based lexer with key whitelisting — \fBsource\fR is never used, preventing arbitrary code execution from modified config files. Config file ownership and permissions (\fB600\fR) are verified and enforced on every load.
@@ -199,11 +248,20 @@ Qemate implements strict \fBflock\fR-based locking on configuration files to pre
 .B QEMATE_VM_DIR
 Overrides the default VM storage directory (\fB~/QVMs\fR).
 .TP
+.B QEMATE_OSX_KVM_CACHE
+Shared OSX-KVM git cache directory (default: \fB$QEMATE_VM_DIR/.cache/OSX-KVM\fR).
+.TP
+.B QEMATE_LOG_RETENTION_DAYS
+Age in days after which timestamped qemu/supervisor/virtiofsd logs are deleted on start (default: \fB14\fR).
+.TP
+.B QEMATE_LOG_MAX_FILES
+Maximum number of timestamped qemu and supervisor log files kept per VM (default: \fB20\fR).
+.TP
 .B LOG_LEVEL
 Sets logging verbosity (\fBDEBUG\fR, \fBINFO\fR, \fBWARNING\fR, \fBERROR\fR; default: INFO).
 .TP
 .B EDITOR
-Editor used by the \fBconfigure\fR command (default: \fBnano\fR).
+Editor used by the \fBconfigure\fR command (falls back to \fBnano\fR, \fBvim\fR, or \fBvi\fR).
 
 .SH FILES
 .TP
@@ -212,6 +270,12 @@ Hardened VM configuration file (permissions: 600).
 .TP
 .I ~/QVMs/VM_NAME/disk.qcow2
 Primary QCOW2 disk image. Absent when \fB--disk-dev\fR is used.
+.TP
+.I ~/QVMs/.cache/OSX-KVM
+Shared OSX-KVM repository cache used by macOS VMs.
+.TP
+.I ~/QVMs/VM_NAME/macos/assets/
+Permanent OpenCore and 4 MiB OVMF assets retained after \fBmacos-eject\fR.
 .TP
 .I ~/QVMs/VM_NAME/logs/qemate.log
 General execution log.
@@ -222,8 +286,14 @@ Symlink to the latest timestamped QEMU stderr log.
 .I ~/QVMs/VM_NAME/logs/qemu-YYYYMMDD-HHMMSS.log
 Timestamped stderr output from one QEMU run.
 .TP
+.I ~/QVMs/VM_NAME/logs/supervisor-YYYYMMDD-HHMMSS.log
+Detached-start supervisor output.
+.TP
 .I ~/QVMs/VM_NAME/logs/virtiofsd_TAG.log
 Per-share virtiofsd daemon log (one per shared folder when using the virtiofs backend).
+.TP
+.I ~/QVMs/VM_NAME/driver_state
+Saved host PCI drivers for VFIO audio restore; retained if restore fails so a later attempt can finish.
 
 .SH EXAMPLES
 Create and start a Windows 11 VM with TPM and VirtIO drivers:
@@ -232,17 +302,36 @@ qemate create win11 --os-type windows --enable-tpm
 qemate start win11 --iso win11.iso --virtio-iso virtio-win.iso
 .EE
 
+Create a macOS VM, prepare recovery media, install, then eject:
+.EX
+qemate create macvm --os-type macos
+qemate macos-install macvm --version sonoma --no-start
+qemate start macvm
+# complete installation in the guest UI
+qemate stop macvm
+qemate macos-eject macvm
+qemate start macvm
+.EE
+
 Create a VM using a physical disk:
 .EX
 qemate create rawvm --os-type linux --disk-dev /dev/sdb
 .EE
 
-Configure a VM (opens $EDITOR):
+Detached start, wait until ready, then inspect logs:
 .EX
-qemate configure myvm
+qemate start myvm --detach --headless
+qemate wait myvm --timeout 60
+qemate logs myvm --qemu -n 50
 .EE
 
-Switch to passt networking (edit NETWORK_TYPE in the config):
+Clone a qcow2-based VM (linked, then full):
+.EX
+qemate clone myvm myvm-copy
+qemate clone myvm myvm-full --full
+.EE
+
+Configure a VM (opens $EDITOR):
 .EX
 qemate configure myvm
 .EE
@@ -262,6 +351,9 @@ Resize a stopped VM disk:
 qemate stop myvm
 qemate resize myvm +20G
 .EE
+
+.SH MACOS NOTES
+Qemate supports x86_64 macOS guests using the OpenCore/recovery workflow from kholia/OSX-KVM. KVM acceleration and \fBignore_msrs=1\fR are required. After installation, install the guest-side mac-guest-agent (ISA serial) and optionally the VMHide Lilu plug-in; see the README for details.
 
 .SH AUTHOR
 Developed by Daniel Zilli.

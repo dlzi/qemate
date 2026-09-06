@@ -1,6 +1,6 @@
 # Maintainer: Daniel Zilli <zilli.daniel@gmail.com>
 pkgname=qemate
-pkgver=4.4.0
+pkgver=5.1.1
 pkgrel=1
 pkgdesc="A streamlined command-line utility for managing QEMU virtual machines"
 arch=('any')
@@ -15,7 +15,10 @@ optdepends=('coreutils: for realpath utility'
     'virtiofsd: high-performance VirtIO-FS shared folders'
     'samba: SMB shared folders (smbd)'
     'passt: unprivileged network backend'
-    'virt-viewer: SPICE display client (remote-viewer)')
+    'virt-viewer: SPICE display client (remote-viewer)'
+    'git: clone OSX-KVM for macOS support'
+    'python: download macOS recovery metadata'
+    'dmg2img: convert the Apple recovery DMG for macOS installation')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
 sha256sums=('SKIP')
 
