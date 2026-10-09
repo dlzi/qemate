@@ -1,12 +1,12 @@
 # Maintainer: Daniel Zilli <zilli.daniel@gmail.com>
 pkgname=qemate
-pkgver=5.1.1
+pkgver=6.0.0
 pkgrel=1
 pkgdesc="A streamlined command-line utility for managing QEMU virtual machines"
 arch=('any')
 url="https://github.com/dlzi/qemate"
 license=('MIT')
-depends=('bash>=5.0' 'qemu>=10.0.0' 'util-linux' 'openbsd-netcat')
+depends=('bash>=5.0' 'qemu>=11.0.0' 'util-linux' 'openbsd-netcat')
 optdepends=('coreutils: for realpath utility'
     'iproute2: for TAP networking (ip command)'
     'edk2-ovmf: UEFI firmware for VMs with ENABLE_UEFI=1'

@@ -1,4 +1,4 @@
-.TH QEMATE 1 "September 5, 2026" "qemate 5.1.1" "User Commands"
+.TH QEMATE 1 "October 9, 2026" "qemate 6.0.0" "User Commands"
 .SH NAME
 qemate \- Hardened QEMU virtual machine manager for Linux
 .SH SYNOPSIS
@@ -13,7 +13,7 @@ qemate \- Hardened QEMU virtual machine manager for Linux
 .B Qemate
 is a streamlined command-line utility for managing QEMU virtual machines (VMs). It simplifies VM creation, control, and configuration, leveraging QEMU with KVM acceleration for enhanced performance when supported by the host system.
 
-QEMU 10.0 or newer is required. Commands that create or resize images or launch a VM reject older QEMU tool versions.
+QEMU 11.0 or newer is required. Commands that create or resize images or launch a VM reject older QEMU tool versions. New VMs use the pinned \fBpc-q35-11.0\fR machine type; legacy \fBq35\fR configs execute with that same pinned machine ABI.
 
 All commands are top-level with hyphenated names. There are no subcommand groups.
 
@@ -34,13 +34,13 @@ Memory size (e.g., \fB4G\fR, \fB8G\fR, \fB2048M\fR). macOS defaults to 8G.
 Number of CPU cores (1\(en64).
 .TP
 .B --disk-size SIZE
-Virtual disk size (e.g., \fB60G\fR). Creates a qcow2 image with metadata preallocation. Mutually exclusive with \fB--disk-dev\fR. Free space on the VM directory is checked before creation.
+Virtual disk size (e.g., \fB60G\fR). Defaults to 256G for macOS, 60G for Windows, and 40G for Linux. Creates a qcow2 image with metadata preallocation. Mutually exclusive with \fB--disk-dev\fR. Free space on the VM directory is checked before creation.
 .TP
 .B --disk-dev PATH
 Raw physical block device to use instead of a qcow2 image (e.g., \fB/dev/sdb\fR). \fB--disk-size\fR is ignored when this is set. Resize and \fBclone\fR are not supported on physical-device VMs.
 .TP
 .B --machine TYPE[,accel=kvm|tcg]
-Machine type (e.g., \fBq35,accel=kvm\fR).
+Machine type (e.g., \fBpc-q35-11.0,accel=kvm\fR).
 .TP
 .B --enable-audio / --no-audio
 Enable guest audio. Without \fBAUDIO_PASSTHROUGH_PCI\fR this attaches emulated Intel HDA using QEMU's default host backend (PipeWire, PulseAudio, or ALSA). Set \fBAUDIO_PASSTHROUGH_PCI\fR in the VM config for VFIO PCIe passthrough instead. Detached VFIO starts require passwordless sudo.
@@ -58,7 +58,7 @@ Enable SPICE display server (default port: 5930). Start prints a \fBremote-viewe
 Select the shared folder backend.
 .TP
 .B --profile balanced|performance
-Select the portable balanced policy (default) or opt in to preallocated, locked memory and tuned VirtIO queues. Hugepages are used when the pool has enough free pages (including with VirtIO-FS shared memory); otherwise qemate falls back to memfd or anonymous RAM. Creating with \fBperformance\fR validates available RAM and the process memlock limit. New performance-profile Windows VMs use VirtIO block and require its storage driver during installation.
+Select the portable balanced policy (default) or opt in to preallocated, locked memory and tuned VirtIO queues. Linux and Windows VirtIO devices advertise negotiated packed/in-order rings, and multiqueue TAP networking advertises RSS. Hash reporting is enabled with QEMU userspace RSS but disabled with the vhost-net eBPF path, which does not support it. Performance mode maps block queues across up to four IOThreads. Hugepages are used when the pool has enough free pages (including with VirtIO-FS shared memory); otherwise qemate falls back to memfd or anonymous RAM. Creating with \fBperformance\fR validates available RAM and the process memlock limit. New performance-profile Windows VMs use VirtIO block and require its storage driver during installation.
 .RE
 
 .TP
@@ -141,11 +141,11 @@ Open the VM config file in \fB$EDITOR\fR, falling back to \fBnano\fR, \fBvim\fR,
 
 .TP
 .B tune NAME balanced|performance
-Change only the runtime performance profile (\fBPERFORMANCE_PROFILE\fR) without replacing custom disk, network, passthrough, or shared-folder settings. The VM must be stopped. For full multi-field edits, use \fBconfigure\fR.
+Change only the runtime performance profile (\fBPERFORMANCE_PROFILE\fR) without replacing custom disk, network, passthrough, or shared-folder settings. Balanced Linux/Windows VirtIO devices advertise negotiated packed/in-order queues. Performance mode additionally maps block queues across up to four IOThreads. The VM must be stopped. For full multi-field edits, use \fBconfigure\fR.
 
 .TP
 .B doctor [NAME]
-Report host KVM, QMP client, AVIC, vhost-net, and memlock readiness. With a VM name, also show effective storage, memory, shared-folder choices, and whether configured port forwards conflict with ports already bound on the host.
+Report QEMU 11, host KVM, QMP client, AVIC, vhost-net, io_uring, and memlock readiness. With a VM name, also show the configured/effective machine type, VirtIO queue features and IOThread count, effective storage and shared-folder choices, and whether configured port forwards conflict with ports already bound on the host.
 
 .SS macOS
 .TP
@@ -167,6 +167,20 @@ Update the shared OSX-KVM cache and the VM's checkout (worktree or local clone).
 .TP
 .B macos-doctor NAME
 Validate OpenCore/OVMF/recovery assets, the KVM \fBignore_msrs\fR requirement, and required QEMU macOS devices.
+
+.SS macOS on a physical partition
+To install macOS on a dedicated host partition, create the VM with \fB--disk-dev /dev/PARTITION\fR instead of \fB--disk-size\fR, then run \fBmacos-install\fR as usual. The partition must be dedicated, unmounted, and writable by the user running qemate; the macOS installer will erase it. Never select the host boot disk or a partition used by the host. Verify the target with \fBlsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINTS\fR and \fBfindmnt -S /dev/PARTITION\fR before creating the VM.
+
+For example:
+.PP
+.EX
+qemate create mac-dev --os-type macos --disk-dev /dev/nvme0n1p6
+qemate macos-install mac-dev --version sonoma --no-start
+qemate macos-doctor mac-dev
+qemate start mac-dev
+.EE
+.PP
+In macOS Recovery, identify the target disk by the dedicated partition's expected size before erasing it as APFS; \fBMacHDD\fR is qemate's QEMU drive identifier, not a guaranteed Disk Utility label. If another displayed disk has the same size or the target cannot be identified with certainty, stop. After installation, stop the VM, run \fBmacos-eject mac-dev\fR, and start it again. Physical-disk VMs cannot be cloned or resized. Deleting the qemate VM removes its metadata but does not erase the host partition.
 
 .SS Port Forwarding
 .TP

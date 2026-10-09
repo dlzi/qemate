@@ -28,7 +28,7 @@ Qemate is a streamlined command-line utility for managing QEMU virtual machines 
 ## Requirements
 
 - **Bash**: Version 5.0 or higher.
-- **QEMU**: `qemu-system-x86_64` and `qemu-img` (version 10.0 or higher).
+- **QEMU**: `qemu-system-x86_64` and `qemu-img` (version 11.0 or higher).
 - **util-linux**: `flock` for lifecycle locking and `setsid` for detached starts.
 - **OpenBSD netcat**: `nc` with Unix-socket support (`nc -U`) for QMP lifecycle control.
 - **Optional**:
@@ -115,7 +115,7 @@ Qemate uses the syntax: `qemate <command> [vm] [options]`.
   - `--cores N` — CPU cores (1–64)
   - `--disk-size SIZE` — e.g. `60G` (creates a qcow2 image; default)
   - `--disk-dev PATH` — e.g. `/dev/sdb` (raw physical block device; mutually exclusive with `--disk-size`). These VMs cannot be resized or cloned; the disk is the host device itself.
-  - `--machine TYPE[,accel=kvm|tcg]` — e.g. `q35,accel=kvm`
+  - `--machine TYPE[,accel=kvm|tcg]` — e.g. `pc-q35-11.0,accel=kvm`
   - `--enable-audio` / `--no-audio` — emulated Intel HDA; set `AUDIO_PASSTHROUGH_PCI` for VFIO passthrough
   - `--enable-tpm` / `--no-tpm` — TPM 2.0 (requires swtpm; default on for Windows)
   - `--uefi` / `--no-uefi` — UEFI firmware (default: on for Windows, off for Linux)
@@ -176,7 +176,7 @@ Qemate uses the syntax: `qemate <command> [vm] [options]`.
   | `CORES`                | vCPU count                                              | `4`                      |
   | `MEMORY`               | RAM allocation                                          | `8G` (macOS) / `4G` (Windows) / `2G` (Linux) |
   | `CPU_TYPE`             | QEMU CPU model                                          | `host`                   |
-  | `MACHINE_TYPE`         | Machine type                                            | `q35`                    |
+  | `MACHINE_TYPE`         | Machine type                                            | `pc-q35-11.0`            |
   | `MACHINE_OPTIONS`      | Machine options                                         | `accel=kvm`              |
   | `NETWORK_TYPE`         | Network backend (`user`, `passt`, `tap`, `none`)        | `user`                   |
   | `NETWORK_MODEL`        | NIC model (`virtio-net-pci`, `e1000`)                   | `virtio-net-pci`         |
@@ -185,7 +185,7 @@ Qemate uses the syntax: `qemate <command> [vm] [options]`.
   | `VIDEO_TYPE`           | Video device                                            | `qxl-vga`, `virtio-vga`  |
   | `VRAM_SIZE_MB`         | VRAM in MiB                                             | `64`                     |
   | `DISK_INTERFACE`       | Disk interface (`virtio`, `nvme`, `ide`, `sata`)        | `virtio`                 |
-  | `DISK_SIZE`            | Reported disk size                                      | `60G`                    |
+  | `DISK_SIZE`            | Reported disk size                                      | `256G` (macOS) / `60G` (Windows) / `40G` (Linux) |
   | `DISK_DEV`             | Physical block device path (if used)                    | `/dev/sdb`               |
   | `DISK_CACHE`           | Disk cache mode                                         | `writeback`              |
   | `DISK_IO`              | Disk I/O mode                                           | `io_uring`               |
@@ -229,15 +229,15 @@ Qemate uses the syntax: `qemate <command> [vm] [options]`.
 
 ### Performance Profiles
 
-`balanced` is the portable default. It preserves demand-allocated memory unless `MEMORY_PREALLOC=1` is set and keeps compatibility-oriented device choices.
+`balanced` is the portable default. It preserves demand-allocated memory unless `MEMORY_PREALLOC=1` is set. Linux and Windows VirtIO block/network devices advertise packed and in-order virtqueues, and multiqueue TAP networking advertises RSS. Hash reporting is enabled with QEMU's userspace RSS path; QEMU's vhost-net eBPF path does not support it. These are negotiated capabilities, so older guest drivers continue to use split queues and omit unsupported features.
 
-`performance` is opt-in. It preallocates and locks guest memory. When the hugepage pool has enough free pages, qemate uses a hugepage-backed memory object with `share=on` (so VirtIO-FS can use it too). If the pool is empty or too small, it falls back to memfd or anonymous RAM instead of failing at QEMU start. It also enables AMD AVIC for Windows when the host confirms support, bounds VirtIO block queues to eight, and gives VirtIO-FS a larger request queue with a daemon thread pool of up to four workers plus `--cache=always` / `--writeback` when supported. New qcow2 images created under this profile use metadata preallocation and a larger cluster size. New Windows VMs created with this profile use VirtIO block and therefore need the VirtIO storage driver during installation. Existing VMs never have their disk interface changed by `tune`.
+`performance` is opt-in. It preallocates and locks guest memory. When the hugepage pool has enough free pages, qemate uses a hugepage-backed memory object with `share=on` (so VirtIO-FS can use it too). If the pool is empty or too small, it falls back to memfd or anonymous RAM instead of failing at QEMU start. It also enables AMD AVIC for Windows when the host confirms support, bounds VirtIO block queues to eight, maps those queues across up to four IOThreads, and gives VirtIO-FS a larger request queue with a daemon thread pool of up to four workers plus `--cache=always` / `--writeback` when supported. New qcow2 images created under this profile use metadata preallocation and a larger cluster size. New Windows VMs created with this profile use VirtIO block and therefore need the VirtIO storage driver during installation. Existing VMs never have their disk interface changed by `tune`.
 
 Run `qemate doctor <n>` before tuning. `CPU_AFFINITY` is deliberately empty by default because reserving host cores is workload- and host-specific.
 
 ### QEMU compatibility
 
-Qemate 5.1.x requires QEMU 10.0 or newer and enforces that floor before image creation, resizing, or VM launch. Its generated x86 command line was audited against QEMU 10.0's [deprecated features](https://qemu.readthedocs.io/en/v10.0.3/about/deprecated.html) and [removed features](https://qemu.readthedocs.io/en/v10.0.3/about/removed-features.html). Qemate does not emit an option or device listed there; existing VM configs continue to use non-versioned `q35` so they follow the installed QEMU's current machine model.
+Qemate 6.0 requires QEMU 11.0 or newer and enforces that floor before image creation, resizing, or VM launch. Its generated x86 command line is audited against QEMU 11.0's [deprecated features](https://qemu.readthedocs.io/en/v11.0.0/about/deprecated.html) and [removed features](https://qemu.readthedocs.io/en/v11.0.0/about/removed-features.html). New VMs use `pc-q35-11.0` for a reproducible machine ABI. Existing configs that contain the legacy unversioned `q35` value execute as `pc-q35-11.0` and persist the pinned value on their next ordinary config save; explicitly selected custom machine types are unchanged.
 
 ### Audio
 
@@ -450,7 +450,7 @@ qemate console myvm
 - **Default Configurations**:
   - **Linux VMs**: 2 cores, 2GB RAM, 40GB disk, VirtIO disk, `virtio-net-pci`, UEFI off, audio off, SPICE off.
   - **Windows VMs**: 4 cores, 4GB RAM, 60GB disk, NVMe disk, `virtio-net-pci`, UEFI on, TPM on, Hyper-V enlightenments, audio off, SPICE off (port 5930).
-  - **macOS VMs**: 4 cores, 8GB RAM, 80GB disk, SATA disk, `virtio-net-pci`, UEFI on, OpenCore, Apple SMC, audio on the QEMU software path, SPICE off. (Sonoma and newer; older releases can still override with `--memory`.)
+  - **macOS VMs**: 4 cores, 8GB RAM, 256GB disk, SATA disk, `virtio-net-pci`, UEFI on, OpenCore, Apple SMC, audio on the QEMU software path, SPICE off. (Sonoma and newer; older releases can still override with `--memory` or `--disk-size`.)
 
 ## macOS
 
@@ -465,7 +465,7 @@ qemate macos-install macvm --version sonoma
 
 Supported versions: `high-sierra`, `mojave`, `catalina`, `big-sur`, `monterey`, `ventura`, `sonoma`, `sequoia`, `tahoe`.
 
-`macos-install` uses a **shared host cache** of the upstream OSX-KVM repository (`$QEMATE_VM_DIR/.cache/OSX-KVM`, overridable via `QEMATE_OSX_KVM_CACHE`) and creates a per-VM worktree (or local shared clone) so multiple macOS VMs do not each download the full tree. It downloads and verifies the Apple recovery image through OSX-KVM's `fetch-macOS-v2.py` workflow, converts it to `BaseSystem.img`, and prepares the VM with the upstream OpenCore image and 4 MiB OVMF layout. The qemate-managed qcow2 disk is the install target.
+`macos-install` uses a **shared host cache** of the upstream OSX-KVM repository (`$QEMATE_VM_DIR/.cache/OSX-KVM`, overridable via `QEMATE_OSX_KVM_CACHE`) and creates a per-VM worktree (or local shared clone) so multiple macOS VMs do not each download the full tree. It downloads and verifies the Apple recovery image through OSX-KVM's `fetch-macOS-v2.py` workflow, converts it to `BaseSystem.img`, and prepares the VM with the upstream OpenCore image and 4 MiB OVMF layout. By default the qemate-managed qcow2 disk is the install target; `--disk-dev` uses a dedicated host block-device partition instead.
 
 The installer media is tracked explicitly: `MACOS_INSTALL_MEDIA=1` while recovery is needed, then `qemate macos-eject <n>` detaches it so subsequent boots use the installed disk through OpenCore. Eject also removes the temporary OSX-KVM checkout and recovery download artifacts (BaseSystem.img/.dmg, chunklists), keeping only the permanent OpenCore and 4 MiB OVMF assets under `macos/assets/`. `qemate macos-recovery <n>` re-prepares recovery media if it was cleaned up. Use `qemate macos-refresh <n>` to update the shared cache and the per-VM checkout, and `qemate macos-doctor <n>` to validate the boot assets, KVM requirement and QEMU devices.
 
@@ -482,6 +482,51 @@ qemate start macvm
 ```
 
 For current modern macOS releases, Qemate follows OSX-KVM's version-specific CPU guidance: Haswell-noTSX for Sonoma and Skylake-Client with HLE/RTM disabled for Sequoia/Tahoe. OSX-KVM also documents `ignore_msrs=1` as required, while its current KVM module examples set `report_ignored_msrs=0`. Qemate validates `ignore_msrs` before launching a macOS guest when the kernel exposes the parameter.
+
+### Install macOS on a dedicated host partition
+
+Use this only with a partition dedicated to the VM. The macOS installer will erase it. Qemate does not create or repartition host disks, and it cannot protect a partition that is mounted or otherwise in use.
+
+1. Review the applicable [Apple license terms](https://www.apple.com/legal/sla/) and confirm that the host and intended use are permitted. Back up any data on the target partition.
+
+2. Create a dedicated partition outside qemate with your normal disk-management tool. Do not use the whole boot disk, a mounted filesystem, a LUKS/LVM member, or any partition the host needs.
+
+3. Identify the exact partition and verify that its `MOUNTPOINTS` column is empty. In this example, `/dev/nvme0n1p6` is a placeholder — replace it only after verifying it is the intended dedicated partition:
+
+   ```bash
+   lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINTS /dev/nvme0n1
+   findmnt -S /dev/nvme0n1p6
+   ```
+
+   No `findmnt` output means no direct mount; a nonzero exit status is expected in that case. The user who runs qemate must also have read/write access to the partition.
+
+4. Create the VM with `--disk-dev`; do not also pass `--disk-size`:
+
+   ```bash
+   qemate create mac-dev \
+     --os-type macos \
+     --disk-dev /dev/nvme0n1p6
+   ```
+
+5. Prepare the recovery installer, validate the macOS prerequisites, then start the VM:
+
+   ```bash
+   qemate macos-install mac-dev --version sonoma --no-start
+   qemate macos-doctor mac-dev
+   qemate start mac-dev
+   ```
+
+6. In macOS Recovery/Disk Utility, identify the target disk by the size of the dedicated partition, then erase and format it as APFS before installing macOS. `MacHDD` is qemate's QEMU drive identifier, not a guaranteed Disk Utility label. Do not change any disk unless its size matches the partition selected in step 3; if another displayed disk has the same size or you cannot identify the target with certainty, stop.
+
+7. When installation completes, stop the VM, eject recovery media, and boot the installed system:
+
+   ```bash
+   qemate stop mac-dev
+   qemate macos-eject mac-dev
+   qemate start mac-dev
+   ```
+
+8. Treat the partition as VM-owned. Physical-disk VMs cannot be cloned or resized by qemate. `qemate delete mac-dev` removes qemate's VM directory and metadata, but does not erase the raw partition; erase or repurpose it explicitly only after the VM is stopped and deleted.
 
 ### Feature compatibility on macOS guests
 

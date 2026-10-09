@@ -15,7 +15,7 @@ Please be respectful and considerate of others when contributing to this project
 ## Development Environment
 
 To set up your development environment, ensure the following packages are installed:
-- **Required**: `bash>=5.0`, `qemu>=10.0.0` (includes `qemu-system-x86_64` and `qemu-img`), `util-linux`, and OpenBSD netcat.
+- **Required**: `bash>=5.0`, `qemu>=11.0.0` (includes `qemu-system-x86_64` and `qemu-img`), `util-linux`, and OpenBSD netcat.
 - **Optional**: `pipewire` (preferred for audio), `pulseaudio`, `alsa-utils`, `samba` (for Windows folder sharing), `coreutils` (for `realpath`), `iproute2` (for `ss`), `net-tools` (for `netstat`).
 
 ## Coding Guidelines

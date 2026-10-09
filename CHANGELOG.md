@@ -2,6 +2,29 @@
 
 All notable changes to qemate are documented in this file.
 
+## [6.0.0] - 2026-10-09
+
+QEMU 11 baseline and performance/stability modernization.
+
+### Changed
+- QEMU 11.0 is now the minimum supported release for `qemu-system-x86_64` and `qemu-img`.
+- New VMs use the pinned `pc-q35-11.0` machine ABI. Legacy `q35` configs execute as `pc-q35-11.0` and are normalized on their next config save; explicit custom machine types remain unchanged.
+- New macOS VMs default to a 256G virtual disk for development workloads.
+- Linux and Windows VirtIO block/network devices advertise negotiated packed and in-order virtqueues.
+- Performance-profile VirtIO block queues are distributed across up to four IOThreads.
+- Multiqueue VirtIO TAP networking advertises RSS; hash reporting is enabled only on QEMU's userspace RSS path because the vhost-net eBPF path does not support it.
+- `doctor` reports the effective machine type, QEMU machine availability, io_uring state, VirtIO features, and IOThread count.
+
+### Compatibility
+- The macOS OpenCore/SATA, VMware SVGA, Apple SMC, and version-specific CPU layout is unchanged.
+- Existing VM disks and explicitly configured non-q35 machine types require no migration.
+
+### Requirements
+- QEMU 11.0+
+- Bash 5+
+
+---
+
 ## [5.1.1] - 2026-09-05
 
 Correctness and documentation follow-up to 5.1.0.

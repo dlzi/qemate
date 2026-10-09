@@ -2,7 +2,7 @@
 # =============================================================================
 # qemate — Streamlined QEMU Virtual Machine Management Utility
 #
-# VERSION:  5.1.1
+# VERSION:  6.0.0
 # LICENSE:  MIT
 # =============================================================================
 
@@ -21,9 +21,10 @@ umask 0077
 # CONSTANTS & DEFAULTS
 # =============================================================================
 
-readonly VERSION="5.1.1"
-readonly MIN_QEMU_MAJOR=10
-readonly MIN_QEMU_VERSION="10.0"
+readonly VERSION="6.0.0"
+readonly MIN_QEMU_MAJOR=11
+readonly MIN_QEMU_VERSION="11.0"
+readonly DEFAULT_MACHINE_TYPE="pc-q35-11.0"
 readonly VM_DIR="${QEMATE_VM_DIR:-$HOME/QVMs}"
 readonly LOG_LEVEL="${LOG_LEVEL:-INFO}"
 readonly DEFAULT_STOP_TIMEOUT=60
@@ -41,7 +42,7 @@ declare -A _BASE_DEFAULTS=(
     [ENABLE_AUDIO]=0
     [AUDIO_PASSTHROUGH_PCI]=0
     [CPU_TYPE]=host
-    [MACHINE_TYPE]=q35
+    [MACHINE_TYPE]="$DEFAULT_MACHINE_TYPE"
     [VIDEO_TYPE]="qxl-vga"
     [VRAM_SIZE_MB]=64
     [DISK_CACHE]=writeback
@@ -65,11 +66,12 @@ declare -A _BASE_DEFAULTS=(
 # Linux: no overrides (virtio disk, UEFI off).
 declare -A _OS_OVERRIDES_linux=()
 # macOS: OpenCore + Apple SMC, UEFI, SATA disk, VMware SVGA-compatible display.
-# Default 8G suits Sonoma and newer; older releases can still override with --memory.
+# Defaults of 8G RAM and a 256G disk suit development workloads on Sonoma and newer;
+# older releases can still override them with --memory and --disk-size.
 declare -A _OS_OVERRIDES_macos=(
     [CORES]=4
     [MEMORY]="8G"
-    [DISK_SIZE]=80G
+    [DISK_SIZE]=256G
     [DISK_INTERFACE]=sata
     [NETWORK_MODEL]=virtio-net-pci
     [VIDEO_TYPE]="vmware"
@@ -418,6 +420,22 @@ require_qemu_version() {
     fi
 }
 
+require_qemu_toolchain() {
+    require_qemu_version qemu-system-x86_64 || return 1
+    require_qemu_version qemu-img || return 1
+}
+
+# Preserve q35 as a legacy config alias while pinning its effective ABI to the
+# QEMU 11.0 machine revision. Explicit custom/versioned machine types are kept.
+effective_machine_type() {
+    local configured="${1:-$DEFAULT_MACHINE_TYPE}"
+    if [[ "$configured" == "q35" ]]; then
+        printf '%s' "$DEFAULT_MACHINE_TYPE"
+    else
+        printf '%s' "$configured"
+    fi
+}
+
 size_to_mib() {
     local size="$1"
     local value="${size%[GMgm]}" unit="${size: -1}"
@@ -476,7 +494,8 @@ disk_dev_in_use_by_other() {
 }
 
 rotate_vm_logs() {
-    local vm_name="$1" log_dir="$VM_DIR/$vm_name/logs"
+    local vm_name="$1"
+    local log_dir="$VM_DIR/$vm_name/logs"
     [[ -d "$log_dir" ]] || return 0
     # Age-based cleanup
     find "$log_dir" -type f \( -name 'qemu-*.log' -o -name 'supervisor-*.log' -o -name 'virtiofsd_*.log' \) \
@@ -739,11 +758,10 @@ validate_vm_config_values() {
             log_message "ERROR" "Invalid MACOS_VERSION: '${_vcv_vm[MACOS_VERSION]:-}'" "$vm_name"; return 1; }
     fi
     if [[ "${_vcv_vm[OS_TYPE]:-linux}" == "macos" ]]; then
-        for key in MACOS_INSTALL_MEDIA; do
-            value="${_vcv_vm[$key]:-0}"
-            [[ "$value" =~ ^[01]$ ]] || {
-                log_message "ERROR" "Invalid $key: '$value' (must be 0 or 1)" "$vm_name"; return 1; }
-        done
+        key="MACOS_INSTALL_MEDIA"
+        value="${_vcv_vm[$key]:-0}"
+        [[ "$value" =~ ^[01]$ ]] || {
+            log_message "ERROR" "Invalid $key: '$value' (must be 0 or 1)" "$vm_name"; return 1; }
 
         value="${_vcv_vm[MACOS_GUEST_AGENT]:-1}"
         [[ "$value" =~ ^[01]$ ]] || {
@@ -889,6 +907,10 @@ save_vm_config() {
     local _fd
     acquire_flock "$config_file.lock" _fd || {
         log_message "ERROR" "Cannot lock config for: $vm_name" "$vm_name"; return 1; }
+
+    if [[ "${_svc_vm[MACHINE_TYPE]:-}" == "q35" ]]; then
+        _svc_vm[MACHINE_TYPE]="$DEFAULT_MACHINE_TYPE"
+    fi
 
     validate_vm_config_values "$vm_name" _svc_vm || {
         release_flock _fd "$config_file.lock"
@@ -1763,6 +1785,7 @@ install_macos() {
 
     macos_version_supported "$version" || {
         log_message "ERROR" "Unsupported macOS version: '$version'. Use: high-sierra, mojave, catalina, big-sur, monterey, ventura, sonoma, sequoia, tahoe"; return 1; }
+    require_qemu_toolchain || return 1
     require_vm "$vm_name" exists unlocked not-running || return 1
 
     local -A VM=()
@@ -1877,6 +1900,8 @@ macos_recovery_attach() {
         [[ -f "$base" ]] || { log_message "ERROR" "Failed to restore recovery media." "$vm_name"; return 1; }
         return 0
     fi
+    # Assigned indirectly by acquire_stopped_vm_lock through a nameref.
+    # shellcheck disable=SC2034
     local fd
     acquire_stopped_vm_lock "$vm_name" fd || return 1
     if ! load_vm_config "$vm_name" VM; then
@@ -1892,6 +1917,7 @@ macos_recovery_attach() {
 
 macos_doctor() {
     local vm_name="$1"
+    require_qemu_toolchain || return 1
     require_vm "$vm_name" exists || return 1
     local -A VM=()
     load_vm_config "$vm_name" VM || return 1
@@ -2134,10 +2160,9 @@ hugepage_mount_for() {
     # 1G mount is a separate pool; only use it when the VM size is a multiple of 1G
     # and the mount has enough pages. HugePages_* in meminfo is the default (usually 2M) pool.
     if [[ -d /dev/hugepages-1G && -w /dev/hugepages-1G ]]; then
-        local one_g_free=0 f
-        for f in /sys/kernel/mm/hugepages/hugepages-1048576kB/free_hugepages; do
-            [[ -r "$f" ]] && one_g_free=$(< "$f")
-        done
+        local one_g_free=0
+        local one_g_free_file=/sys/kernel/mm/hugepages/hugepages-1048576kB/free_hugepages
+        [[ -r "$one_g_free_file" ]] && one_g_free=$(< "$one_g_free_file")
         if [[ "$one_g_free" =~ ^[0-9]+$ ]] && (( requested_kib % 1048576 == 0 && one_g_free * 1048576 >= requested_kib )); then
             printf '%s' /dev/hugepages-1G
             return 0
@@ -2225,18 +2250,45 @@ configure_disk() {
         virtio)
             local queues="${_dsk_vm[CORES]}"
             (( queues > 8 )) && queues=8
-            local virtio_dev_opts="drive=drive0,iothread=iothread0,num-queues=${queues}"
+            local iothread_count=1 i thread mapping="" vqs="" comma=""
+            if [[ "${_dsk_vm[PERFORMANCE_PROFILE]:-balanced}" == "performance" ]]; then
+                iothread_count="$queues"
+                (( iothread_count > 4 )) && iothread_count=4
+            fi
+            for (( i=0; i<iothread_count; i++ )); do
+                _dsk_cmd+=("-object" "iothread,id=iothread${i}")
+            done
+
+            local virtio_dev_json
+            if (( iothread_count == 1 )); then
+                virtio_dev_json="{\"driver\":\"virtio-blk-pci\",\"drive\":\"drive0\",\"iothread\":\"iothread0\",\"num-queues\":${queues},\"packed\":true,\"in_order\":true"
+            else
+                mapping="["
+                comma=""
+                for (( thread=0; thread<iothread_count; thread++ )); do
+                    vqs="["
+                    local vq_comma=""
+                    for (( i=thread; i<queues; i+=iothread_count )); do
+                        vqs+="${vq_comma}${i}"
+                        vq_comma=","
+                    done
+                    vqs+="]"
+                    mapping+="${comma}{\"iothread\":\"iothread${thread}\",\"vqs\":${vqs}}"
+                    comma=","
+                done
+                mapping+="]"
+                virtio_dev_json="{\"driver\":\"virtio-blk-pci\",\"drive\":\"drive0\",\"num-queues\":${queues},\"packed\":true,\"in_order\":true,\"iothread-vq-mapping\":${mapping}"
+            fi
             if [[ -n "${_dsk_vm[DISK_DEV]:-}" ]]; then
                 # write-cache=on: the SSD has its own hardware write cache; tell
                 #   the guest so it doesn't issue redundant flush commands.
-                # packed=on: packed virtqueue reduces per-I/O CPU overhead (QEMU 5+).
                 # discard=on: advertises TRIM support to the guest.
-                virtio_dev_opts+=",write-cache=on,packed=on,discard=on"
+                virtio_dev_json+=",\"write-cache\":\"on\",\"discard\":true"
             fi
+            virtio_dev_json+=",\"werror\":\"stop\",\"rerror\":\"report\"}"
             _dsk_cmd+=(
-                "-object" "iothread,id=iothread0"
                 "-drive"  "file=${disk_file},if=none,id=drive0,${drive_opts}"
-                "-device" "virtio-blk-pci,${virtio_dev_opts},werror=stop,rerror=report"
+                "-device" "$virtio_dev_json"
             ) ;;
         nvme)
             _dsk_cmd+=(
@@ -2339,6 +2391,12 @@ configure_network() {
     fi
 
     local mac="${_net_vm[MAC_ADDRESS]}" model="${_net_vm[NETWORK_MODEL]}"
+    local device_opts="${model},netdev=net0,mac=${mac}"
+    if [[ "$model" == "virtio-net-pci" && "${_net_vm[OS_TYPE]:-linux}" != "macos" ]]; then
+        # Both features are negotiated: older guest drivers continue to use
+        # split, out-of-order virtqueues when they do not support them.
+        device_opts+=",packed=on,in_order=on"
+    fi
 
     case "${_net_vm[NETWORK_TYPE]:-user}" in
         user|nat)
@@ -2374,7 +2432,7 @@ configure_network() {
                 done
             fi
 
-            _net_cmd+=("-netdev" "$netdev_opts" "-device" "${model},netdev=net0,mac=${mac}")
+            _net_cmd+=("-netdev" "$netdev_opts" "-device" "$device_opts")
             log_message "INFO" "Network: user/NAT (SLiRP)" "$vm_name" ;;
 
         passt)
@@ -2405,7 +2463,7 @@ configure_network() {
                 done
             fi
 
-            _net_cmd+=("-netdev" "$passt_opts" "-device" "${model},netdev=net0,mac=${mac}")
+            _net_cmd+=("-netdev" "$passt_opts" "-device" "$device_opts")
             log_message "INFO" "Network: passt (unprivileged)" "$vm_name" ;;
 
         tap)
@@ -2431,16 +2489,25 @@ configure_network() {
             if [[ "$queues" -gt 1 ]]; then
                 mq_netdev=",queues=${queues},vhost=${vhost}"
                 mq_device=",mq=on,vectors=$(( queues * 2 + 2 ))"
+                if [[ "$model" == "virtio-net-pci" && "${_net_vm[OS_TYPE]:-linux}" != "macos" ]]; then
+                    # QEMU's vhost-net eBPF RSS path cannot report packet hashes
+                    # to the guest. Hash reporting is available with userspace RSS.
+                    if [[ "$vhost" == "on" ]]; then
+                        mq_device+=",rss=on,hash=off"
+                    else
+                        mq_device+=",rss=on,hash=on"
+                    fi
+                fi
             fi
 
-            _net_cmd+=("-netdev" "tap,id=net0,ifname=${tap_name},script=no,downscript=no${mq_netdev}" "-device" "${model},netdev=net0,mac=${mac}${mq_device}")
+            _net_cmd+=("-netdev" "tap,id=net0,ifname=${tap_name},script=no,downscript=no${mq_netdev}" "-device" "${device_opts}${mq_device}")
             log_message "INFO" "Network: TAP ($tap_name, queues=${queues}, vhost=${vhost})" "$vm_name" ;;
 
         none)
             _net_cmd+=("-nic" "none") ;;
         *)
             log_message "WARNING" "Unknown NETWORK_TYPE '${_net_vm[NETWORK_TYPE]}'; falling back to user." "$vm_name"
-            _net_cmd+=("-netdev" "user,id=net0" "-device" "${model},netdev=net0,mac=${mac}") ;;
+            _net_cmd+=("-netdev" "user,id=net0" "-device" "$device_opts") ;;
     esac
 }
 
@@ -2727,7 +2794,7 @@ configure_tpm() {
 # =============================================================================
 
 create() {
-    require_qemu_version qemu-img || return 1
+    require_qemu_toolchain || return 1
     local vm_name="$1"; shift
     local os_type="linux" memory="" cores="" disk_size="" disk_dev="" machine_type="" \
           machine_options="" enable_audio="" enable_tpm="" enable_uefi="" spice_enabled="" share_backend="" profile="balanced"
@@ -2742,7 +2809,7 @@ create() {
             --machine)
                 [[ $# -ge 2 && "$2" != --* ]] || { log_message "ERROR" "--machine requires a value"; return 1; }
                 [[ "$2" =~ ^([^,]+)(,(accel=kvm|accel=tcg))?$ ]] || {
-                    log_message "ERROR" "Invalid machine: '$2'. Use e.g. q35,accel=kvm"; return 1; }
+                    log_message "ERROR" "Invalid machine: '$2'. Use e.g. pc-q35-11.0,accel=kvm"; return 1; }
                 machine_type="${BASH_REMATCH[1]}"
                 machine_options="${BASH_REMATCH[3]:-accel=kvm}"
                 shift 2 ;;
@@ -3015,7 +3082,7 @@ start() {
         write_detach_status "STARTING" "$BASHPID"
     fi
 
-    require_qemu_version qemu-system-x86_64 || return 1
+    require_qemu_toolchain || return 1
 
     if [[ "$detach" == "1" && "$internal_detach" != "1" && "$dry_run" != "1" ]]; then
         local -a detached_args=()
@@ -3080,7 +3147,9 @@ start() {
         [[ "$eff_be" == "virtiofs" ]] && VM[MEMORY_SHARE]=1
     fi
 
-    local machine_str="${VM[MACHINE_TYPE]},${VM[MACHINE_OPTIONS]}"
+    local effective_machine machine_str
+    effective_machine=$(effective_machine_type "${VM[MACHINE_TYPE]}")
+    machine_str="${effective_machine},${VM[MACHINE_OPTIONS]}"
     [[ "${VM[OS_TYPE]:-linux}" == "windows" ]] && machine_str+=",hpet=off"
 
     local qemu_cmd=(
@@ -3337,7 +3406,7 @@ delete() {
 }
 
 resize_disk() {
-    require_qemu_version qemu-img || return 1
+    require_qemu_toolchain || return 1
     local vm_name="$1" new_size="$2"
 
     require_vm "$vm_name" exists unlocked || return 1
@@ -3513,7 +3582,13 @@ status() {
     printf "  %-16s %s\n" "Profile:"        "${VM[PERFORMANCE_PROFILE]:-balanced}"
     printf "  %-16s %s\n" "Memory policy:"  "$( [[ "${VM[PERFORMANCE_PROFILE]:-balanced}" == "performance" || "${VM[MEMORY_PREALLOC]:-0}" == "1" ]] && echo "preallocated" || echo "demand-allocated" )"
     printf "  %-16s %s\n" "CPU affinity:"   "${VM[CPU_AFFINITY]:-automatic}"
-    printf "  %-16s %s\n" "Machine:"        "${VM[MACHINE_TYPE]} (${VM[MACHINE_OPTIONS]})"
+    local effective_machine
+    effective_machine=$(effective_machine_type "${VM[MACHINE_TYPE]}")
+    if [[ "$effective_machine" == "${VM[MACHINE_TYPE]}" ]]; then
+        printf "  %-16s %s\n" "Machine:" "$effective_machine (${VM[MACHINE_OPTIONS]})"
+    else
+        printf "  %-16s %s\n" "Machine:" "${VM[MACHINE_TYPE]} → $effective_machine (${VM[MACHINE_OPTIONS]})"
+    fi
     printf "  %-16s %s\n" "Video:"          "${VM[VIDEO_TYPE]}"
     printf "  %-16s %s\n" "Disk Interface:" "${VM[DISK_INTERFACE]}"
     printf "  %-16s %s\n" "Disk I/O:"       "${VM[DISK_IO]} / cache=${VM[DISK_CACHE]} / discard=${VM[DISK_DISCARD]}"
@@ -3598,6 +3673,14 @@ doctor_qemu_command() {
     doctor_item OK "$first_line"
 }
 
+qemu_machine_available() {
+    local wanted="$1" machine _
+    while read -r machine _; do
+        [[ "$machine" == "$wanted" ]] && return 0
+    done < <(qemu-system-x86_64 -machine help 2>/dev/null)
+    return 1
+}
+
 doctor() {
     local vm_name="${1:-}" failures=0
     echo "qemate host diagnostics"
@@ -3623,7 +3706,48 @@ doctor() {
     local -A VM=()
     load_vm_config "$vm_name" VM || return 1
     doctor_item INFO "profile=${VM[PERFORMANCE_PROFILE]:-balanced}, vCPUs=${VM[CORES]}, memory=${VM[MEMORY]}"
+    local configured_machine="${VM[MACHINE_TYPE]}" effective_machine
+    effective_machine=$(effective_machine_type "$configured_machine")
+    doctor_item INFO "machine=${configured_machine} (effective: ${effective_machine})"
+    if qemu_machine_available "$effective_machine"; then
+        doctor_item OK "QEMU provides machine type: $effective_machine"
+    else
+        doctor_item FAIL "QEMU does not provide machine type: $effective_machine"
+        failures=1
+    fi
     doctor_item INFO "disk=${VM[DISK_INTERFACE]}, aio=${VM[DISK_IO]}, cache=${VM[DISK_CACHE]}"
+    if [[ "${VM[DISK_IO]}" == "io_uring" && -r /proc/sys/kernel/io_uring_disabled ]]; then
+        local io_uring_disabled
+        io_uring_disabled=$(< /proc/sys/kernel/io_uring_disabled)
+        if [[ "$io_uring_disabled" == "0" ]]; then
+            doctor_item OK "kernel io_uring is enabled"
+        else
+            doctor_item WARN "kernel io_uring is restricted (io_uring_disabled=$io_uring_disabled)"
+        fi
+    fi
+    if [[ "${VM[DISK_INTERFACE]}" == "virtio" && "${VM[OS_TYPE]:-linux}" != "macos" ]]; then
+        local virtio_queues="${VM[CORES]}" disk_iothreads=1
+        (( virtio_queues > 8 )) && virtio_queues=8
+        if [[ "${VM[PERFORMANCE_PROFILE]:-balanced}" == "performance" ]]; then
+            disk_iothreads="$virtio_queues"
+            (( disk_iothreads > 4 )) && disk_iothreads=4
+        fi
+        doctor_item INFO "VirtIO block: queues=$virtio_queues, IOThreads=$disk_iothreads, packed=on, in_order=on"
+    fi
+    if [[ "${VM[NETWORK_TYPE]}" != "none" &&
+          "${VM[NETWORK_MODEL]}" == "virtio-net-pci" &&
+          "${VM[ENABLE_VIRTIO]:-1}" == "1" &&
+          "${VM[OS_TYPE]:-linux}" != "macos" ]]; then
+        local net_features="packed=on, in_order=on"
+        if [[ "${VM[NETWORK_TYPE]}" == "tap" && "${VM[CORES]}" -ge 4 ]]; then
+            if [[ -r /dev/vhost-net && -w /dev/vhost-net ]]; then
+                net_features+=", RSS=on, hash=off (vhost-net)"
+            else
+                net_features+=", RSS/hash=on (QEMU userspace)"
+            fi
+        fi
+        doctor_item INFO "VirtIO network: $net_features"
+    fi
     local backend; backend=$(resolve_share_backend VM)
     doctor_item INFO "share backend: ${VM[SHARE_BACKEND]:-auto} (effective: $backend)"
     [[ "$backend" != "virtfs" ]] || doctor_item WARN "VirtFS/9p favors compatibility over shared-folder performance"
@@ -3801,7 +3925,7 @@ console() {
 }
 
 clone_vm() {
-    require_qemu_version qemu-img || return 1
+    require_qemu_toolchain || return 1
     local src="$1" dst="$2"; shift 2
     local full_copy="0"
     while [[ $# -gt 0 ]]; do
@@ -3819,6 +3943,8 @@ clone_vm() {
     [[ -n "${VM[DISK_DEV]:-}" ]] && {
         log_message "ERROR" "Cannot clone a VM that uses a physical disk device"; return 1; }
 
+    # Assigned indirectly by acquire_stopped_vm_lock through a nameref.
+    # shellcheck disable=SC2034
     local src_fd
     acquire_stopped_vm_lock "$src" src_fd || return 1
 
@@ -3907,6 +4033,7 @@ VM
       --cores N                      vCPU count
       --disk-size SIZE               e.g. 60G  (qcow2 image; default)
       --disk-dev PATH                e.g. /dev/sdb, /dev/sdb1  (raw physical partition)
+      --machine TYPE[,accel=kvm|tcg] (default: pc-q35-11.0,accel=kvm)
       --enable-audio | --no-audio     emulated HDA; set AUDIO_PASSTHROUGH_PCI for VFIO
       --enable-tpm   | --no-tpm        (default: on for windows)
       --uefi         | --no-uefi        (default: on for windows, off for linux)

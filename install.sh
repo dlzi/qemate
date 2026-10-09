@@ -17,12 +17,12 @@ done
 
 # Check dependencies
 if ! command -v qemu-system-x86_64 &> /dev/null; then
-    echo "Error: qemu-system-x86_64 not found. Please install QEMU version 10.0 or higher."
+    echo "Error: qemu-system-x86_64 not found. Please install QEMU version 11.0 or higher."
     exit 1
 fi
 
 if ! command -v qemu-img &> /dev/null; then
-    echo "Error: qemu-img not found. Please install QEMU version 10.0 or higher."
+    echo "Error: qemu-img not found. Please install QEMU version 11.0 or higher."
     exit 1
 fi
 
@@ -44,8 +44,8 @@ fi
 for qemu_command in qemu-system-x86_64 qemu-img; do
     qemu_version_output=$("$qemu_command" --version 2>/dev/null || true)
     if [[ ! "$qemu_version_output" =~ version[[:space:]]+([0-9]+)(\.[0-9]+)? ]] ||
-       (( BASH_REMATCH[1] < 10 )); then
-        echo "Error: $qemu_command from QEMU 10.0 or higher is required. Please upgrade QEMU."
+       (( BASH_REMATCH[1] < 11 )); then
+        echo "Error: $qemu_command from QEMU 11.0 or higher is required. Please upgrade QEMU."
         exit 1
     fi
 done
