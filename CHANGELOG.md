@@ -16,6 +16,9 @@ QEMU 11 baseline and performance/stability modernization.
 - `doctor` reports the effective machine type, QEMU machine availability, io_uring state, VirtIO features, and IOThread count.
 - Completed macOS installs configure a private OpenCore image for a 1920x1080 boot screen, a five-second picker, and normal APFS scanning without raw EFI entries; recovery restores permissive scanning.
 - Added stopped-VM `macos-boot`, `macos-vmhide`, and `macos-efi-restore` commands. VMHide is opt-in and experimental, installs verified release archives with Lilu ordered first, and creates a bootable OpenCore backup before every managed EFI change.
+- Added `macos-verbose NAME on|off` to capture macOS startup failures. It changes only the `-v` boot argument, preserves other configured arguments, and backs up the private OpenCore image before each change.
+- `macos-install` now displays one interactive version menu when `--version` is omitted and suppresses the duplicate product list emitted by the upstream downloader. Noninteractive callers must continue to pass an explicit version.
+- OpenCore backup names now remain unique when several managed EFI changes occur within the same second.
 
 ### Compatibility
 - The macOS OpenCore/SATA, VMware SVGA, Apple SMC, and version-specific CPU layout is unchanged.

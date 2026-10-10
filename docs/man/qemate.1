@@ -150,7 +150,7 @@ Report QEMU 11, host KVM, QMP client, AVIC, vhost-net, io_uring, and memlock rea
 .SS macOS
 .TP
 .B macos-install NAME [--version VERSION] [--no-start] [--refresh]
-Prepare an Apple recovery installer via kholia/OSX-KVM and start the VM by default. Uses a shared host OSX-KVM cache with a per-VM worktree (or local shared clone). Supported versions: high-sierra, mojave, catalina, big-sur, monterey, ventura, sonoma, sequoia, tahoe. Requires git, Python 3, and dmg2img. Use \fB--no-start\fR to prepare only.
+Prepare an Apple recovery installer via kholia/OSX-KVM and start the VM by default. When \fB--version\fR is omitted, display the supported versions and wait for an interactive selection. Noninteractive use must provide \fB--version\fR. Uses a shared host OSX-KVM cache with a per-VM worktree (or local shared clone). Supported versions: high-sierra, mojave, catalina, big-sur, monterey, ventura, sonoma, sequoia, tahoe. Requires git, Python 3, and dmg2img. Use \fB--no-start\fR to prepare only.
 
 .TP
 .B macos-eject NAME
@@ -163,6 +163,10 @@ Re-attach recovery media for maintenance or reinstallation. Re-prepares media vi
 .TP
 .B macos-boot NAME [--resolution WIDTHxHEIGHT] [--timeout SECONDS]
 Configure the stopped installed VM's private OpenCore image for normal boots. The defaults are \fB1920x1080\fR and a five-second visible picker. The normal scan policy excludes raw EFI entries. The final macOS desktop resolution is selected inside macOS System Settings -> Displays.
+
+.TP
+.B macos-verbose NAME on|off
+Enable or disable verbose macOS boot output in the stopped VM's private OpenCore image. Preserves other configured boot arguments and creates a bootable OpenCore backup before changing the EFI. Requires qemu-img, sfdisk, mtools, and Python 3. The configured \fBboot-args\fR value becomes authoritative over a value already saved in firmware NVRAM.
 
 .TP
 .B macos-vmhide NAME install|remove|status
@@ -181,7 +185,7 @@ Update the shared OSX-KVM cache and the VM's checkout (worktree or local clone).
 Validate OpenCore/OVMF/recovery assets, the KVM \fBignore_msrs\fR requirement, and required QEMU macOS devices.
 
 .SS macOS on a physical partition
-To install macOS on a dedicated host partition, create the VM with \fB--disk-dev /dev/PARTITION\fR instead of \fB--disk-size\fR, then run \fBmacos-install\fR as usual. The partition must be dedicated, unmounted, and writable by the user running qemate; the macOS installer will erase it. Never select the host boot disk or a partition used by the host. Verify the target with \fBlsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINTS\fR and \fBfindmnt -S /dev/PARTITION\fR before creating the VM.
+To install macOS on a dedicated host partition, create the VM with \fB--disk-dev /dev/PARTITION\fR instead of \fB--disk-size\fR, then run \fBmacos-install\fR as usual. Qemate accepts block devices but does not determine whether one is a whole disk, mounted, or otherwise in use. The partition must be dedicated, unmounted, and writable by the user running qemate; the macOS installer will erase it. Never select the host boot disk or a partition used by the host. Verify the target with \fBlsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINTS\fR and \fBfindmnt -S /dev/PARTITION\fR before creating the VM.
 
 For example:
 .PP
@@ -192,7 +196,7 @@ qemate macos-doctor mac-dev
 qemate start mac-dev
 .EE
 .PP
-In the first graphical boot, choose the macOS recovery/installer entry if OpenCore displays a boot picker. In Recovery, open Disk Utility and choose \fBView > Show All Devices\fR. Identify the target disk by the dedicated partition's expected size before erasing it as APFS; if Disk Utility offers a scheme selector, choose GUID Partition Map. \fBMacHDD\fR is qemate's QEMU drive identifier, not a guaranteed Disk Utility label. If another displayed disk has the same size or the target cannot be identified with certainty, stop. Quit Disk Utility, choose Install macOS, and select the new APFS volume. Keep recovery media attached through all installer restarts and the Setup Assistant. After setup reaches the desktop, stop the VM, run \fBmacos-eject mac-dev\fR, and start it again. Physical-disk VMs cannot be cloned or resized. Deleting the qemate VM removes its metadata but does not erase the host partition.
+At the initial OpenCore picker, select \fBmacOS Base System\fR and press Enter to boot Recovery; do not select \fBEFI\fR. If the picker also shows \fBdisk\fR, that is the install target, not Recovery. In Recovery, open Disk Utility and choose \fBView > Show All Devices\fR. Identify the target disk by the dedicated partition's expected size before erasing it as APFS; if Disk Utility offers a scheme selector, choose GUID Partition Map. \fBMacHDD\fR is qemate's QEMU drive identifier, not a guaranteed Disk Utility label. If another displayed disk has the same size or the target cannot be identified with certainty, stop. Quit Disk Utility, choose Reinstall macOS (the requested version, such as Sonoma), and select the new APFS volume. During installer restarts, choose \fBmacOS Installer\fR (or the similarly named installer entry) in the OpenCore picker until installation finishes, then choose the installed macOS volume. Keep recovery media attached through Setup Assistant. After setup reaches the desktop, stop the VM, run \fBmacos-eject mac-dev\fR, and start it again. Physical-disk VMs cannot be cloned or resized. Deleting the qemate VM removes its metadata but does not erase the host partition.
 
 .SS Port Forwarding
 .TP

@@ -214,7 +214,7 @@ Qemate uses the syntax: `qemate <command> [vm] [options]`.
 ### macOS Commands
 
 - `qemate macos-install <n> [--version VERSION] [--no-start] [--refresh]`
-  Prepares an Apple recovery installer via [kholia/OSX-KVM](https://github.com/kholia/OSX-KVM) and starts the VM by default. See [macOS](#macos) below for details.
+  Prepares an Apple recovery installer via [kholia/OSX-KVM](https://github.com/kholia/OSX-KVM) and starts the VM by default. When `--version` is omitted, qemate displays the supported versions and waits for an interactive selection. Noninteractive use must provide `--version`. See [macOS](#macos) below for details.
 
 - `qemate macos-eject <n>`
   Detaches installer/recovery media after installation; subsequent boots use the installed disk through OpenCore. Also removes the temporary OSX-KVM git checkout and recovery download artifacts, keeping permanent OpenCore/OVMF assets under `macos/assets/`.
@@ -224,6 +224,9 @@ Qemate uses the syntax: `qemate <command> [vm] [options]`.
 
 - `qemate macos-boot <n> [--resolution WIDTHxHEIGHT] [--timeout SECONDS]`
   Configures the private OpenCore image used for normal installed-system boots. Defaults to a `1920x1080` OpenCore/OVMF boot screen and a visible five-second picker that skips raw EFI entries.
+
+- `qemate macos-verbose <n> on|off`
+  Enables or disables verbose macOS boot output in the private OpenCore image. It preserves other boot arguments and creates a bootable OpenCore backup before changing the EFI. The VM must be stopped; requires `qemu-img`, `sfdisk`, mtools, and Python 3. OpenCore's configured `boot-args` become authoritative so the toggle also overrides values saved in firmware NVRAM.
 
 - `qemate macos-vmhide <n> install|remove|status`
   Installs, removes, or inspects the opt-in VMHide/Lilu OpenCore kexts. Installation downloads release archives, verifies the published SHA-256 digests, requires a stopped post-install VM, and keeps a bootable backup.
@@ -475,6 +478,14 @@ qemate macos-install macvm --version sonoma
 
 Supported versions: `high-sierra`, `mojave`, `catalina`, `big-sur`, `monterey`, `ventura`, `sonoma`, `sequoia`, `tahoe`.
 
+Omit `--version` to choose interactively:
+
+```bash
+qemate macos-install macvm
+```
+
+For scripts and redirected input, specify the version explicitly with `--version`.
+
 `macos-install` uses a **shared host cache** of the upstream OSX-KVM repository (`$QEMATE_VM_DIR/.cache/OSX-KVM`, overridable via `QEMATE_OSX_KVM_CACHE`) and creates a per-VM worktree (or local shared clone) so multiple macOS VMs do not each download the full tree. It downloads and verifies the Apple recovery image through OSX-KVM's `fetch-macOS-v2.py` workflow, converts it to `BaseSystem.img`, and prepares the VM with the upstream OpenCore image and 4 MiB OVMF layout. By default the qemate-managed qcow2 disk is the install target; `--disk-dev` uses a dedicated host block-device partition instead.
 
 The installer media is tracked explicitly: `MACOS_INSTALL_MEDIA=1` while recovery is needed, then `qemate macos-eject <n>` detaches it so subsequent boots use the installed disk through OpenCore. Eject also removes the temporary OSX-KVM checkout and recovery download artifacts (BaseSystem.img/.dmg, chunklists), keeping only the permanent OpenCore and 4 MiB OVMF assets under `macos/assets/`. During eject, qemate configures the VM's private OpenCore image for a `1920x1080` boot screen, a five-second picker, and normal installed-system scanning without raw EFI entries. `macos-recovery <n>` restores permissive scanning before attaching recovery media. Use `macos-refresh <n>` to update the shared cache and checkout, and `macos-doctor <n>` to validate boot assets, the KVM requirement, and QEMU devices.
@@ -495,7 +506,7 @@ For current modern macOS releases, Qemate follows OSX-KVM's version-specific CPU
 
 ### Install macOS on a dedicated host partition
 
-Use this only with a partition dedicated to the VM. The macOS installer will erase it. Qemate does not create or repartition host disks, and it cannot protect a partition that is mounted or otherwise in use.
+Use this only with a partition dedicated to the VM. The macOS installer will erase it. Qemate accepts block devices but does not determine whether one is a whole disk, mounted, or otherwise in use. It does not create or repartition host disks, so verify the target yourself before creating the VM.
 
 1. Review the applicable [Apple license terms](https://www.apple.com/legal/sla/) and confirm that the host and intended use are permitted. Back up any data on the target partition.
 
@@ -528,11 +539,11 @@ Use this only with a partition dedicated to the VM. The macOS installer will era
 
 6. Complete the installation in the first graphical boot:
 
-   1. If OpenCore shows a boot picker, choose the macOS recovery/installer entry.
+   1. At the initial OpenCore picker, use the arrow keys to select **macOS Base System** and press **Enter**. This boots Recovery. Do not select **EFI**. If the picker also shows **disk**, that is the install target, not the Recovery environment.
    2. In Recovery, open **Disk Utility** and select **View > Show All Devices**.
    3. Identify the target disk by the size of the dedicated partition. `MacHDD` is qemate's QEMU drive identifier, not a guaranteed Disk Utility label. Do not change any disk unless its size matches the partition selected in step 3; if another displayed disk has the same size or you cannot identify the target with certainty, stop.
    4. Erase the target as **APFS**. If Disk Utility offers a scheme selector for that device, choose **GUID Partition Map**. Give the new volume a recognizable name, such as `Macintosh HD`.
-   5. Quit Disk Utility, choose **Install macOS**, and select the new APFS volume. Let the installer reboot as often as needed. If OpenCore returns to its picker during installation, select the installer entry until the installed macOS volume is available.
+   5. Quit Disk Utility, choose **Reinstall macOS** (the screen names the requested version, such as Sonoma), and select the new APFS volume. Let the installer reboot as often as needed. If OpenCore returns to its picker during installation, select **macOS Installer** (or the similarly named installer entry) to continue. After installation finishes, select the installed macOS volume.
    6. Complete the macOS Setup Assistant. Keep recovery media attached until setup reaches the desktop; ejecting it earlier can leave the installer unavailable for a required reboot.
 
 7. When installation completes, stop the VM, eject recovery media, and boot the installed system:
@@ -561,6 +572,25 @@ To change the boot-screen resolution or picker delay on an installed VM:
 qemate stop macvm
 qemate macos-boot macvm --resolution 1920x1080 --timeout 5
 ```
+
+If macOS returns to the OpenCore picker before Recovery or the desktop appears, enable verbose boot output to capture where startup stops:
+
+```bash
+qemate stop mac-dev
+qemate macos-verbose mac-dev on
+qemate start mac-dev
+```
+
+Select **macOS Base System** at the picker and photograph the last visible boot messages. After capturing them, stop the VM and disable verbose output:
+
+```bash
+qemate stop mac-dev
+qemate macos-verbose mac-dev off
+```
+
+This toggles only the exact `-v` token in OpenCore's `boot-args`; all other arguments are preserved. Each change creates a restorable backup under `macos/backups/`.
+
+OpenCore normally keeps an existing firmware NVRAM value instead of replacing it from `NVRAM -> Add`. Qemate marks `boot-args` for replacement so the verbose setting takes effect and can later be disabled reliably. This makes the OpenCore config's `boot-args` authoritative for that VM.
 
 `macos-boot` controls the OpenCore/OVMF display. qemate gives `vmware-svga` 64 MiB of video memory by default, enough for 1920×1080. Once macOS has started, select the final guest mode in **System Settings → Displays**. If the guest cannot display a selected mode, return to the previous mode or run `macos-boot` again while stopped.
 

@@ -1653,6 +1653,72 @@ macos_version_supported() {
     [[ "$1" =~ ^(high-sierra|mojave|catalina|big-sur|monterey|ventura|sonoma|sequoia|tahoe)$ ]]
 }
 
+macos_choose_version() {
+    local -n _selected_version="$1"
+    local -a versions=(
+        tahoe
+        sequoia
+        sonoma
+        ventura
+        monterey
+        big-sur
+        catalina
+        mojave
+        high-sierra
+    )
+    local -a labels=(
+        "macOS Tahoe"
+        "macOS Sequoia"
+        "macOS Sonoma"
+        "macOS Ventura"
+        "macOS Monterey"
+        "macOS Big Sur"
+        "macOS Catalina"
+        "macOS Mojave"
+        "macOS High Sierra"
+    )
+    local choice index
+
+    [[ -t 0 ]] || {
+        log_message "ERROR" "No macOS version was provided and input is not interactive. Use --version VERSION."
+        return 1
+    }
+
+    printf 'Select a macOS version:\n' >&2
+    for index in "${!versions[@]}"; do
+        printf '  %d) %s (%s)\n' "$((index + 1))" "${labels[index]}" "${versions[index]}" >&2
+    done
+
+    while true; do
+        printf 'Enter selection [1-%d]: ' "${#versions[@]}" >&2
+        if ! IFS= read -r choice; then
+            printf '\n' >&2
+            log_message "ERROR" "No macOS version selected."
+            return 1
+        fi
+        if [[ "$choice" =~ ^[0-9]+$ ]]; then
+            index=$((10#$choice - 1))
+            if (( index >= 0 && index < ${#versions[@]} )); then
+                _selected_version="${versions[index]}"
+                return 0
+            fi
+        fi
+        printf 'Invalid selection. Enter a number from 1 to %d.\n' "${#versions[@]}" >&2
+    done
+}
+
+macos_download_recovery() {
+    local repo="$1" version="$2"
+    (
+        cd "$repo" || return 1
+        # OSX-KVM currently prints its full numbered product menu even when a
+        # valid --shortname already selected the product. Hide only those
+        # duplicate menu rows while retaining progress and error output.
+        PYTHONUNBUFFERED=1 python3 ./fetch-macOS-v2.py --shortname="$version" |
+            sed -E '/^[0-9]+\. (High Sierra|Mojave|Catalina|Big Sur|Monterey|Ventura|Sonoma|Sequoia|Tahoe)( \(|$)/d'
+    )
+}
+
 macos_cpu_model() {
     # Follow OSX-KVM: Penryn for older releases, Haswell-noTSX for Sonoma,
     # Skylake-Client (HLE/RTM off) for Sequoia/Tahoe.
@@ -1856,12 +1922,15 @@ macos_efi_drive() {
 macos_backup_opencore_image() {
     local vm_name="$1" image="$2" label="$3"
     local backup_dir="$VM_DIR/$vm_name/macos/backups"
-    local timestamp backup
+    local timestamp backup suffix=0
     timestamp=$(date -u +%Y%m%dT%H%M%SZ)
     mkdir -p "$backup_dir" || return 1
     chmod 700 "$backup_dir" 2>/dev/null || true
     backup="$backup_dir/OpenCore.${label}.${timestamp}.qcow2"
-    [[ ! -e "$backup" ]] || backup="$backup_dir/OpenCore.${label}.${timestamp}.${BASHPID}.qcow2"
+    while [[ -e "$backup" ]]; do
+        (( ++suffix ))
+        backup="$backup_dir/OpenCore.${label}.${timestamp}.${suffix}.qcow2"
+    done
     cp --reflink=auto --preserve=mode "$image" "$backup" || {
         log_message "ERROR" "Failed to create OpenCore backup: $backup" "$vm_name"
         return 1
@@ -1921,6 +1990,36 @@ if action in {"boot-normal", "boot-recovery"}:
     # EFI System Partitions.  Zero is OpenCore's permissive scan policy used
     # while recovery/install media is attached.
     security["ScanPolicy"] = 0xF0103 if action == "boot-normal" else 0
+
+if action in {"verbose-on", "verbose-off"}:
+    nvram = mapping(config, "NVRAM")
+    add = mapping(nvram, "Add")
+    apple_guid = "7C436110-AB2A-4BBB-A880-FE41995C9F82"
+    add_guid = next((key for key in add
+                     if isinstance(key, str) and key.upper() == apple_guid), apple_guid)
+    apple_nvram = mapping(add, add_guid)
+    boot_args = apple_nvram.get("boot-args", "")
+    if not isinstance(boot_args, str):
+        raise SystemExit("OpenCore NVRAM boot-args must be a string")
+    arguments = boot_args.split()
+    if action == "verbose-on":
+        if "-v" not in arguments:
+            arguments.append("-v")
+    else:
+        arguments = [argument for argument in arguments if argument != "-v"]
+    apple_nvram["boot-args"] = " ".join(arguments)
+
+    # NVRAM Add does not replace an existing firmware variable. Delete it first
+    # so the configured value, with or without -v, is applied on the next boot.
+    delete = mapping(nvram, "Delete")
+    delete_guid = next((key for key in delete
+                       if isinstance(key, str) and key.upper() == apple_guid), apple_guid)
+    deleted_variables = delete.get(delete_guid, [])
+    if not isinstance(deleted_variables, list) or any(not isinstance(name, str) for name in deleted_variables):
+        raise SystemExit("OpenCore NVRAM Delete entry must be an array of strings")
+    if "boot-args" not in deleted_variables:
+        deleted_variables.append("boot-args")
+    delete[delete_guid] = deleted_variables
 
 if action in {"vmhide-install", "vmhide-remove"}:
     kernel = mapping(config, "Kernel")
@@ -2026,6 +2125,11 @@ macos_mutate_opencore_locked() {
         boot-normal|boot-recovery)
             macos_update_opencore_plist "$plist" "$action" "$resolution" "$timeout" || {
                 log_message "ERROR" "Failed to update OpenCore boot configuration" "$vm_name"
+                rm -rf "$work_dir"; return 1; }
+            ;;
+        verbose-on|verbose-off)
+            macos_update_opencore_plist "$plist" "$action" || {
+                log_message "ERROR" "Failed to update OpenCore verbose boot argument" "$vm_name"
                 rm -rf "$work_dir"; return 1; }
             ;;
         vmhide-install)
@@ -2212,6 +2316,27 @@ macos_boot_configure() {
     return "$result"
 }
 
+macos_verbose_configure() {
+    local vm_name="${1:-}" mode="${2:-}"
+    [[ $# -eq 2 && ( "$mode" == "on" || "$mode" == "off" ) ]] || {
+        log_message "ERROR" "Usage: macos-verbose <name> on|off"; return 1; }
+    require_vm "$vm_name" exists unlocked not-running || return 1
+    local -A VM=()
+    load_vm_config "$vm_name" VM || return 1
+    [[ "${VM[OS_TYPE]:-}" == "macos" ]] || { log_message "ERROR" "VM is not macOS: $vm_name" "$vm_name"; return 1; }
+
+    local fd result
+    acquire_stopped_vm_lock "$vm_name" fd || return 1
+    if macos_mutate_opencore_locked "$vm_name" "verbose-$mode"; then
+        result=0
+    else
+        result=$?
+    fi
+    release_flock fd "$VM_DIR/$vm_name/qemu.pid.lock"
+    [[ "$result" -eq 0 ]] && log_message "INFO" "Verbose macOS boot ${mode}." "$vm_name"
+    return "$result"
+}
+
 macos_set_recovery_boot_locked() {
     local vm_name="$1"
     macos_mutate_opencore_locked "$vm_name" boot-recovery "$MACOS_DEFAULT_RESOLUTION" "$MACOS_DEFAULT_BOOT_TIMEOUT"
@@ -2367,7 +2492,7 @@ configure_macos_guest_agent() {
 
 install_macos() {
     local vm_name="$1"; shift
-    local version="sonoma" no_start="0" refresh="0"
+    local version="" no_start="0" refresh="0"
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --version) [[ $# -ge 2 && "$2" != --* ]] || { log_message "ERROR" "--version requires a value"; return 1; }; version="$2"; shift 2 ;;
@@ -2376,6 +2501,10 @@ install_macos() {
             *) log_message "ERROR" "Unknown option: $1"; return 1 ;;
         esac
     done
+
+    if [[ -z "$version" ]]; then
+        macos_choose_version version || return 1
+    fi
 
     macos_version_supported "$version" || {
         log_message "ERROR" "Unsupported macOS version: '$version'. Use: high-sierra, mojave, catalina, big-sur, monterey, ventura, sonoma, sequoia, tahoe"; return 1; }
@@ -2403,7 +2532,7 @@ install_macos() {
     if [[ ! -f "$requested_image" || "${VM[MACOS_VERSION]:-}" != "$version" ]]; then
         log_message "INFO" "Downloading macOS $version recovery image from Apple via OSX-KVM..." "$vm_name"
         rm -f "$repo"/BaseSystem.dmg "$repo"/BaseSystem.img "$repo"/*.chunklist
-        if ! (cd "$repo" && python3 ./fetch-macOS-v2.py --shortname="$version" && [[ -f BaseSystem.dmg ]] && dmg2img -i BaseSystem.dmg BaseSystem.img); then
+        if ! (macos_download_recovery "$repo" "$version" && [[ -f "$repo/BaseSystem.dmg" ]] && dmg2img -i "$repo/BaseSystem.dmg" "$repo/BaseSystem.img"); then
             log_message "ERROR" "Failed to download or convert the macOS recovery image" "$vm_name"
             release_flock fd "$VM_DIR/$vm_name/qemu.pid.lock"; return 1
         fi
@@ -2607,7 +2736,7 @@ macos_doctor() {
        command -v mdeltree >/dev/null 2>&1 && command -v mtype >/dev/null 2>&1; then
         log_message "INFO" "OK: mtools available for managed OpenCore EFI changes" "$vm_name"
     else
-        log_message "WARNING" "mtools is missing; macos-eject, macos-recovery, and macos-boot cannot manage the OpenCore EFI" "$vm_name"
+        log_message "WARNING" "mtools is missing; macos-eject, macos-recovery, macos-boot, and macos-verbose cannot manage the OpenCore EFI" "$vm_name"
     fi
     if command -v curl >/dev/null 2>&1 && command -v unzip >/dev/null 2>&1 &&
        command -v file >/dev/null 2>&1 && command -v sha256sum >/dev/null 2>&1; then
@@ -4700,7 +4829,8 @@ VM
 
 MACOS
   macos-install  <name> [--version VERSION] [--no-start] [--refresh]
-      Prepare an Apple recovery installer via kholia/OSX-KVM. Starts by default.
+      Prepare an Apple recovery installer via kholia/OSX-KVM. If --version is
+      omitted, select from an interactive version list. Starts by default.
   macos-eject    <name>
       Detach recovery media after installation; next boot uses the installed disk.
       Also removes the temporary OSX-KVM checkout and recovery download artifacts.
@@ -4708,6 +4838,8 @@ MACOS
       Re-attach recovery media (re-downloads if previously cleaned up by eject).
   macos-boot     <name> [--resolution WIDTHxHEIGHT] [--timeout SECONDS]
       Configure normal OpenCore boot (default: 1920x1080, five-second picker).
+  macos-verbose  <name> on|off
+      Toggle verbose macOS boot output while preserving other OpenCore boot arguments.
   macos-vmhide   <name> install|remove|status
       Manage the opt-in VMHide and Lilu OpenCore kexts for an installed VM.
   macos-efi-restore <name> <backup-file>
@@ -4761,6 +4893,7 @@ main() {
         macos-eject)   [[ $# -eq 0 ]] && { echo "Error: VM name required"; exit 1; }; macos_finalize_install "$@" ;;
         macos-recovery) [[ $# -eq 0 ]] && { echo "Error: VM name required"; exit 1; }; macos_recovery_attach "$@" ;;
         macos-boot)    [[ $# -eq 0 ]] && { echo "Error: VM name required"; exit 1; }; macos_boot_configure "$@" ;;
+        macos-verbose) [[ $# -ne 2 ]] && { echo "Error: Usage: macos-verbose <name> on|off"; exit 1; }; macos_verbose_configure "$@" ;;
         macos-vmhide)  [[ $# -lt 2 ]] && { echo "Error: VM name and action required"; exit 1; }; macos_vmhide "$@" ;;
         macos-efi-restore) [[ $# -ne 2 ]] && { echo "Error: VM name and backup file required"; exit 1; }; macos_efi_restore "$@" ;;
         macos-refresh) [[ $# -eq 0 ]] && { echo "Error: VM name required"; exit 1; }; macos_refresh_repo "$@" ;;
