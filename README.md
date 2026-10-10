@@ -40,6 +40,7 @@ Qemate is a streamlined command-line utility for managing QEMU virtual machines 
   - **vfio-pci kernel module**: Required for PCIe audio passthrough. IOMMU must be enabled in BIOS/UEFI and via kernel parameters (`intel_iommu=on` or `amd_iommu=on`).
   - **edk2-ovmf / ovmf**: UEFI firmware (Arch: `sudo pacman -S edk2-ovmf`; Debian/Ubuntu: `sudo apt install ovmf`; Fedora: `sudo dnf install edk2-ovmf`).
   - **macOS installer prerequisites**: `git`, Python 3, and **dmg2img** (Arch: `sudo pacman -S git python dmg2img`).
+  - **macOS EFI management**: `mtools` for `macos-eject`, `macos-recovery`, and `macos-boot`; `curl`, `unzip`, `file`, and `sha256sum` are additionally required for managed VMHide. On Arch: `sudo pacman -S mtools curl unzip file coreutils`; on Debian/Ubuntu: `sudo apt install mtools curl unzip file coreutils`.
 - **Recommended**: KVM support for hardware acceleration (`/dev/kvm` accessible).
 
 ## Installation
@@ -220,6 +221,15 @@ Qemate uses the syntax: `qemate <command> [vm] [options]`.
 
 - `qemate macos-recovery <n>`
   Re-attaches recovery media for maintenance or reinstallation (re-prepares via `macos-install` if the media was cleaned up by eject).
+
+- `qemate macos-boot <n> [--resolution WIDTHxHEIGHT] [--timeout SECONDS]`
+  Configures the private OpenCore image used for normal installed-system boots. Defaults to a `1920x1080` OpenCore/OVMF boot screen and a visible five-second picker that skips raw EFI entries.
+
+- `qemate macos-vmhide <n> install|remove|status`
+  Installs, removes, or inspects the opt-in VMHide/Lilu OpenCore kexts. Installation downloads release archives, verifies the published SHA-256 digests, requires a stopped post-install VM, and keeps a bootable backup.
+
+- `qemate macos-efi-restore <n> <backup-file>`
+  Restores a stopped VM's private OpenCore image from a file listed in `macos/backups/`.
 
 - `qemate macos-refresh <n>`
   Updates the shared OSX-KVM cache and the VM's checkout (worktree or local clone).
@@ -467,7 +477,7 @@ Supported versions: `high-sierra`, `mojave`, `catalina`, `big-sur`, `monterey`, 
 
 `macos-install` uses a **shared host cache** of the upstream OSX-KVM repository (`$QEMATE_VM_DIR/.cache/OSX-KVM`, overridable via `QEMATE_OSX_KVM_CACHE`) and creates a per-VM worktree (or local shared clone) so multiple macOS VMs do not each download the full tree. It downloads and verifies the Apple recovery image through OSX-KVM's `fetch-macOS-v2.py` workflow, converts it to `BaseSystem.img`, and prepares the VM with the upstream OpenCore image and 4 MiB OVMF layout. By default the qemate-managed qcow2 disk is the install target; `--disk-dev` uses a dedicated host block-device partition instead.
 
-The installer media is tracked explicitly: `MACOS_INSTALL_MEDIA=1` while recovery is needed, then `qemate macos-eject <n>` detaches it so subsequent boots use the installed disk through OpenCore. Eject also removes the temporary OSX-KVM checkout and recovery download artifacts (BaseSystem.img/.dmg, chunklists), keeping only the permanent OpenCore and 4 MiB OVMF assets under `macos/assets/`. `qemate macos-recovery <n>` re-prepares recovery media if it was cleaned up. Use `qemate macos-refresh <n>` to update the shared cache and the per-VM checkout, and `qemate macos-doctor <n>` to validate the boot assets, KVM requirement and QEMU devices.
+The installer media is tracked explicitly: `MACOS_INSTALL_MEDIA=1` while recovery is needed, then `qemate macos-eject <n>` detaches it so subsequent boots use the installed disk through OpenCore. Eject also removes the temporary OSX-KVM checkout and recovery download artifacts (BaseSystem.img/.dmg, chunklists), keeping only the permanent OpenCore and 4 MiB OVMF assets under `macos/assets/`. During eject, qemate configures the VM's private OpenCore image for a `1920x1080` boot screen, a five-second picker, and normal installed-system scanning without raw EFI entries. `macos-recovery <n>` restores permissive scanning before attaching recovery media. Use `macos-refresh <n>` to update the shared cache and checkout, and `macos-doctor <n>` to validate boot assets, the KVM requirement, and QEMU devices.
 
 Typical lifecycle:
 
@@ -516,7 +526,14 @@ Use this only with a partition dedicated to the VM. The macOS installer will era
    qemate start mac-dev
    ```
 
-6. In macOS Recovery/Disk Utility, identify the target disk by the size of the dedicated partition, then erase and format it as APFS before installing macOS. `MacHDD` is qemate's QEMU drive identifier, not a guaranteed Disk Utility label. Do not change any disk unless its size matches the partition selected in step 3; if another displayed disk has the same size or you cannot identify the target with certainty, stop.
+6. Complete the installation in the first graphical boot:
+
+   1. If OpenCore shows a boot picker, choose the macOS recovery/installer entry.
+   2. In Recovery, open **Disk Utility** and select **View > Show All Devices**.
+   3. Identify the target disk by the size of the dedicated partition. `MacHDD` is qemate's QEMU drive identifier, not a guaranteed Disk Utility label. Do not change any disk unless its size matches the partition selected in step 3; if another displayed disk has the same size or you cannot identify the target with certainty, stop.
+   4. Erase the target as **APFS**. If Disk Utility offers a scheme selector for that device, choose **GUID Partition Map**. Give the new volume a recognizable name, such as `Macintosh HD`.
+   5. Quit Disk Utility, choose **Install macOS**, and select the new APFS volume. Let the installer reboot as often as needed. If OpenCore returns to its picker during installation, select the installer entry until the installed macOS volume is available.
+   6. Complete the macOS Setup Assistant. Keep recovery media attached until setup reaches the desktop; ejecting it earlier can leave the installer unavailable for a required reboot.
 
 7. When installation completes, stop the VM, eject recovery media, and boot the installed system:
 
@@ -527,6 +544,25 @@ Use this only with a partition dedicated to the VM. The macOS installer will era
    ```
 
 8. Treat the partition as VM-owned. Physical-disk VMs cannot be cloned or resized by qemate. `qemate delete mac-dev` removes qemate's VM directory and metadata, but does not erase the raw partition; erase or repurpose it explicitly only after the VM is stopped and deleted.
+
+### Boot picker and 1920×1080 display
+
+After `macos-eject`, qemate configures OpenCore to display a five-second boot picker and then start the installed macOS volume. The normal scan policy excludes raw EFI partitions, so an `EFI` entry does not need to be selected manually. Recovery remains available:
+
+```bash
+qemate stop macvm
+qemate macos-recovery macvm
+qemate start macvm
+```
+
+To change the boot-screen resolution or picker delay on an installed VM:
+
+```bash
+qemate stop macvm
+qemate macos-boot macvm --resolution 1920x1080 --timeout 5
+```
+
+`macos-boot` controls the OpenCore/OVMF display. qemate gives `vmware-svga` 64 MiB of video memory by default, enough for 1920×1080. Once macOS has started, select the final guest mode in **System Settings → Displays**. If the guest cannot display a selected mode, return to the previous mode or run `macos-boot` again while stopped.
 
 ### Feature compatibility on macOS guests
 
@@ -586,9 +622,32 @@ qemu-ga-client --address=${HOME}/QVMs/macvm/sockets/mac-guest-agent.sock ping
 
 `qemate macos-doctor <n>` reports whether the ISA serial device exists in QEMU and whether the socket is present while the VM is running. Set `MACOS_GUEST_AGENT=0` in the VM config to omit the serial device.
 
-#### 2. VMHide
+#### 2. VMHide (experimental)
 
-Install [Carnations-Botanica/VMHide](https://github.com/Carnations-Botanica/VMHide) inside the guest as a Lilu plug-in (requires Lilu 1.7.0+). It selectively hides VMM presence from the guest and is configured through the macOS guest's OpenCore Kexts/config.plist. Qemate does not inject or modify the guest EFI automatically; add the kext yourself after first boot for the best compatibility with modern macOS releases.
+[Carnations-Botanica/VMHide](https://github.com/Carnations-Botanica/VMHide) is a Lilu plug-in that selectively hides VMM presence. It is designed for Sequoia and requires Lilu 1.7.0 or later. Qemate manages it only as an explicit post-install operation:
+
+```bash
+qemate stop macvm
+qemate macos-vmhide macvm install
+qemate start macvm
+```
+
+The installer downloads release builds of VMHide and Lilu, verifies the published SHA-256 digests, confirms the VMHide executable contains an x86_64 slice, copies both kexts into the VM's private OpenCore EFI, and registers Lilu before VMHide in `Kernel/Add`. It does not add VMHide debug, strict, or logging boot arguments.
+
+VMHide changes the guest kernel's VMM-presence behavior, so it is experimental until verified in the target guest. After two successful boots, confirm both kexts are loaded with `kmutil showloaded`, verify the expected VMM-presence behavior, and verify normal login, networking, and App Store access. Remove it if any regression appears:
+
+```bash
+qemate stop macvm
+qemate macos-vmhide macvm status
+qemate macos-vmhide macvm remove
+```
+
+Every managed EFI change creates a named qcow2 backup in `${HOME}/QVMs/macvm/macos/backups/`. To restore one, pass its basename (not a path):
+
+```bash
+qemate stop macvm
+qemate macos-efi-restore macvm OpenCore.vmhide-install.20261010T120000Z.qcow2
+```
 
 OC4VM is used as a reference for OpenCore guest configuration, boot-argument management, diagnostics and modern macOS support, but its current project is VMware-focused and explicitly removed QEMU support because it was considered problematic/unstable. Qemate therefore does not copy VMware VMX/VMDK settings into its QEMU backend.
 
@@ -720,4 +779,4 @@ Developed by Daniel Zilli.
 
 ### Related OpenCore projects
 
-Qemate uses **OSX-KVM** as the QEMU/KVM boot and recovery reference. After installation, **[mac-guest-agent](https://github.com/mav2287/mac-guest-agent)** is the recommended guest-side QEMU Guest Agent (ISA serial; Tiger through Tahoe). **OC4VM** is currently a VMware-focused project; its maintainer removed QEMU support in 1.1.0, so Qemate does not copy its VMware VMX/VMDK machinery. Its current releases are still useful as a reference for OpenCore configuration, guest tools, boot-argument management, and troubleshooting workflows. **VMHide** is a guest-side Lilu plug-in for selectively hiding VMM presence, not a QEMU host configuration feature. It is therefore intentionally not enabled or embedded by default in Qemate.
+Qemate uses **OSX-KVM** as the QEMU/KVM boot and recovery reference. After installation, **[mac-guest-agent](https://github.com/mav2287/mac-guest-agent)** is the recommended guest-side QEMU Guest Agent (ISA serial; Tiger through Tahoe). **OC4VM** is currently a VMware-focused project; its maintainer removed QEMU support in 1.1.0, so Qemate does not copy its VMware VMX/VMDK machinery. Its current releases are still useful as a reference for OpenCore configuration, guest tools, boot-argument management, and troubleshooting workflows. **VMHide** is a guest-side Lilu plug-in for selectively hiding VMM presence, not a QEMU host configuration feature. Qemate therefore manages it only through the explicit, experimental `macos-vmhide` command and never embeds it by default.

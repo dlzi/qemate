@@ -14,6 +14,8 @@ QEMU 11 baseline and performance/stability modernization.
 - Performance-profile VirtIO block queues are distributed across up to four IOThreads.
 - Multiqueue VirtIO TAP networking advertises RSS; hash reporting is enabled only on QEMU's userspace RSS path because the vhost-net eBPF path does not support it.
 - `doctor` reports the effective machine type, QEMU machine availability, io_uring state, VirtIO features, and IOThread count.
+- Completed macOS installs configure a private OpenCore image for a 1920x1080 boot screen, a five-second picker, and normal APFS scanning without raw EFI entries; recovery restores permissive scanning.
+- Added stopped-VM `macos-boot`, `macos-vmhide`, and `macos-efi-restore` commands. VMHide is opt-in and experimental, installs verified release archives with Lilu ordered first, and creates a bootable OpenCore backup before every managed EFI change.
 
 ### Compatibility
 - The macOS OpenCore/SATA, VMware SVGA, Apple SMC, and version-specific CPU layout is unchanged.
@@ -22,6 +24,7 @@ QEMU 11 baseline and performance/stability modernization.
 ### Requirements
 - QEMU 11.0+
 - Bash 5+
+- macOS EFI management: mtools and Python 3; VMHide installation additionally needs curl, unzip, file, and sha256sum.
 
 ---
 

@@ -30,6 +30,10 @@ readonly LOG_LEVEL="${LOG_LEVEL:-INFO}"
 readonly DEFAULT_STOP_TIMEOUT=60
 readonly DETACH_START_TIMEOUT=30
 readonly MACOS_KVM_REPO="https://github.com/kholia/OSX-KVM.git"
+readonly VMHIDE_RELEASE_API="https://api.github.com/repos/Carnations-Botanica/VMHide/releases/latest"
+readonly LILU_RELEASE_API="https://api.github.com/repos/acidanthera/Lilu/releases/latest"
+readonly MACOS_DEFAULT_RESOLUTION="1920x1080"
+readonly MACOS_DEFAULT_BOOT_TIMEOUT=5
 
 # Shared defaults for all OS types.
 declare -A _BASE_DEFAULTS=(
@@ -1754,6 +1758,596 @@ macos_refresh_repo() {
     release_flock fd "$VM_DIR/$vm_name/qemu.pid.lock"
 }
 
+# Return the OpenCore image used for a VM without creating or modifying files.
+macos_opencore_image() {
+    local vm_name="$1"
+    local -n _image_ref="$2"
+    local macos_dir="$VM_DIR/$vm_name/macos"
+    local asset="$macos_dir/assets/OpenCore.qcow2"
+    local checkout="$macos_dir/OSX-KVM/OpenCore/OpenCore.qcow2"
+
+    if [[ -f "$asset" ]]; then
+        _image_ref="$asset"
+    elif [[ -f "$checkout" ]]; then
+        _image_ref="$checkout"
+    else
+        log_message "ERROR" "OpenCore image is missing (run macos-install or macos-refresh)" "$vm_name"
+        return 1
+    fi
+}
+
+# Make a per-VM, persistent OpenCore copy before changing its EFI.  The source
+# checkout can be removed by macos-eject or reset by macos-refresh, so it must
+# never be modified in place by managed guest tooling.
+macos_private_opencore_image() {
+    local vm_name="$1"
+    local -n _image_ref="$2"
+    local macos_dir="$VM_DIR/$vm_name/macos"
+    local assets="$macos_dir/assets"
+    local private_image="$assets/OpenCore.qcow2"
+    local checkout="$macos_dir/OSX-KVM/OpenCore/OpenCore.qcow2"
+
+    if [[ ! -f "$private_image" ]]; then
+        [[ -f "$checkout" ]] || {
+            log_message "ERROR" "OpenCore image is missing (run macos-install or macos-refresh)" "$vm_name"
+            return 1
+        }
+        mkdir -p "$assets" || {
+            log_message "ERROR" "Failed to create persistent macOS asset directory" "$vm_name"
+            return 1
+        }
+        chmod 700 "$assets" 2>/dev/null || true
+        cp "$checkout" "$private_image" || {
+            log_message "ERROR" "Failed to create private OpenCore image" "$vm_name"
+            return 1
+        }
+        chmod 600 "$private_image"
+    fi
+    _image_ref="$private_image"
+}
+
+macos_require_efi_tools() {
+    require_commands qemu-img sfdisk mcopy mmd mdeltree mtype python3 || {
+        log_message "ERROR" "macOS EFI management requires qemu-img, util-linux (sfdisk), mtools, and Python 3."
+        return 1
+    }
+}
+
+macos_efi_partition_offset() {
+    local raw_image="$1"
+    local -n _offset_ref="$2"
+    local detected_offset
+    detected_offset=$(sfdisk --json "$raw_image" 2>/dev/null | python3 -c '
+import json
+import sys
+
+doc = json.load(sys.stdin)
+table = doc.get("partitiontable", {})
+sector_size = int(table.get("sectorsize", 512))
+parts = table.get("partitions", [])
+efi_types = {
+    "c12a7328-f81f-11d2-ba4b-00a0c93ec93b",  # GPT EFI System Partition
+    "ef", "uefi",
+}
+for part in parts:
+    kind = str(part.get("type", "")).lower()
+    if kind in efi_types:
+        print(int(part["start"]) * sector_size)
+        raise SystemExit(0)
+if len(parts) == 1:
+    print(int(parts[0]["start"]) * sector_size)
+    raise SystemExit(0)
+raise SystemExit("could not identify an EFI System Partition")
+') || {
+        log_message "ERROR" "Could not identify the EFI partition in OpenCore image: $raw_image"
+        return 1
+    }
+    [[ "$detected_offset" =~ ^[0-9]+$ ]] || {
+        log_message "ERROR" "Invalid EFI partition offset returned for OpenCore image"
+        return 1
+    }
+    _offset_ref="$detected_offset"
+}
+
+macos_efi_drive() {
+    printf '%s@@%s' "$1" "$2"
+}
+
+macos_backup_opencore_image() {
+    local vm_name="$1" image="$2" label="$3"
+    local backup_dir="$VM_DIR/$vm_name/macos/backups"
+    local timestamp backup
+    timestamp=$(date -u +%Y%m%dT%H%M%SZ)
+    mkdir -p "$backup_dir" || return 1
+    chmod 700 "$backup_dir" 2>/dev/null || true
+    backup="$backup_dir/OpenCore.${label}.${timestamp}.qcow2"
+    [[ ! -e "$backup" ]] || backup="$backup_dir/OpenCore.${label}.${timestamp}.${BASHPID}.qcow2"
+    cp --reflink=auto --preserve=mode "$image" "$backup" || {
+        log_message "ERROR" "Failed to create OpenCore backup: $backup" "$vm_name"
+        return 1
+    }
+    chmod 600 "$backup"
+    log_message "INFO" "OpenCore backup created: $backup" "$vm_name"
+}
+
+# Update only qemate-owned OpenCore settings.  plistlib both writes canonical
+# XML and verifies the resulting plist before the EFI image is rebuilt.
+macos_update_opencore_plist() {
+    local plist="$1" action="$2" resolution="${3:-}" timeout="${4:-}"
+    python3 - "$plist" "$action" "$resolution" "$timeout" <<'PY'
+import os
+import plistlib
+import sys
+import tempfile
+
+path, action, resolution, timeout = sys.argv[1:]
+with open(path, "rb") as handle:
+    config = plistlib.load(handle)
+
+if not isinstance(config, dict):
+    raise SystemExit("OpenCore config.plist root must be a dictionary")
+
+def mapping(parent, key):
+    value = parent.get(key)
+    if not isinstance(value, dict):
+        value = {}
+        parent[key] = value
+    return value
+
+def standard_kext(bundle, executable, comment):
+    return {
+        "Arch": "x86_64",
+        "BundlePath": bundle,
+        "Comment": comment,
+        "Enabled": True,
+        "ExecutablePath": executable,
+        "MaxKernel": "",
+        "MinKernel": "",
+        "PlistPath": "Contents/Info.plist",
+    }
+
+if action in {"boot-normal", "boot-recovery"}:
+    if not resolution or not timeout:
+        raise SystemExit("resolution and timeout are required for boot configuration")
+    uefi = mapping(config, "UEFI")
+    output = mapping(uefi, "Output")
+    output["Resolution"] = resolution
+    misc = mapping(config, "Misc")
+    boot = mapping(misc, "Boot")
+    boot["ShowPicker"] = True
+    boot["Timeout"] = int(timeout)
+    security = mapping(misc, "Security")
+    # 0xF0103 permits APFS and the normal SATA/NVMe device classes but excludes
+    # EFI System Partitions.  Zero is OpenCore's permissive scan policy used
+    # while recovery/install media is attached.
+    security["ScanPolicy"] = 0xF0103 if action == "boot-normal" else 0
+
+if action in {"vmhide-install", "vmhide-remove"}:
+    kernel = mapping(config, "Kernel")
+    add = kernel.get("Add")
+    if not isinstance(add, list):
+        add = []
+        kernel["Add"] = add
+    vmhide_path = "VMHide.kext"
+    lilu_path = "Lilu.kext"
+    if action == "vmhide-install":
+        positions = [i for i, item in enumerate(add)
+                     if isinstance(item, dict) and item.get("BundlePath") in {lilu_path, vmhide_path}]
+        insert_at = min(positions) if positions else 0
+        kept = [item for item in add
+                if not (isinstance(item, dict) and item.get("BundlePath") in {lilu_path, vmhide_path})]
+        entries = [
+            standard_kext(lilu_path, "Contents/MacOS/Lilu", "qemate: dependency for VMHide"),
+            standard_kext(vmhide_path, "Contents/MacOS/VMHide", "qemate: hide VMM presence"),
+        ]
+        kept[insert_at:insert_at] = entries
+        kernel["Add"] = kept
+    else:
+        kernel["Add"] = [item for item in add
+                         if not (isinstance(item, dict) and item.get("BundlePath") == vmhide_path)]
+
+directory = os.path.dirname(path) or "."
+fd, temporary = tempfile.mkstemp(prefix="config.plist.", suffix=".tmp", dir=directory)
+try:
+    with os.fdopen(fd, "wb") as handle:
+        plistlib.dump(config, handle, sort_keys=False)
+    with open(temporary, "rb") as handle:
+        plistlib.load(handle)
+    os.replace(temporary, path)
+finally:
+    if os.path.exists(temporary):
+        os.unlink(temporary)
+PY
+}
+
+macos_efi_prepare_raw() {
+    local vm_name="$1" image="$2" work_dir="$3"
+    local -n _raw_ref="$4" _offset_ref="$5"
+    local prepared_raw="$work_dir/OpenCore.raw" prepared_offset
+    qemu-img check -q "$image" >/dev/null || {
+        log_message "ERROR" "OpenCore image failed qemu-img validation: $image" "$vm_name"
+        return 1
+    }
+    qemu-img convert -O raw "$image" "$prepared_raw" || {
+        log_message "ERROR" "Failed to read OpenCore image" "$vm_name"
+        return 1
+    }
+    macos_efi_partition_offset "$prepared_raw" prepared_offset || return 1
+    _raw_ref="$prepared_raw"
+    _offset_ref="$prepared_offset"
+}
+
+macos_efi_commit_raw() {
+    local vm_name="$1" raw="$2" image="$3" work_dir="$4"
+    local candidate="$work_dir/OpenCore.new.qcow2"
+    qemu-img convert -O qcow2 "$raw" "$candidate" || {
+        log_message "ERROR" "Failed to rebuild OpenCore image" "$vm_name"
+        return 1
+    }
+    qemu-img check -q "$candidate" >/dev/null || {
+        log_message "ERROR" "Rebuilt OpenCore image failed qemu-img validation" "$vm_name"
+        return 1
+    }
+    chmod 600 "$candidate"
+    mv -f "$candidate" "$image" || {
+        log_message "ERROR" "Failed to atomically replace OpenCore image" "$vm_name"
+        return 1
+    }
+}
+
+# Apply an EFI change while the VM lifecycle lock is already held.  The source
+# image is unchanged until the rebuilt qcow2 passes qemu-img validation.
+macos_mutate_opencore_locked() {
+    local vm_name="$1" action="$2" resolution="${3:-}" timeout="${4:-}" stage_dir="${5:-}"
+    local image macos_dir work_dir raw offset drive plist
+    macos_require_efi_tools || return 1
+    macos_private_opencore_image "$vm_name" image || return 1
+    macos_dir="$VM_DIR/$vm_name/macos"
+    work_dir=$(mktemp -d "$macos_dir/.efi-edit.XXXXXX") || {
+        log_message "ERROR" "Failed to create temporary EFI workspace" "$vm_name"
+        return 1
+    }
+    chmod 700 "$work_dir" 2>/dev/null || true
+
+    if ! macos_backup_opencore_image "$vm_name" "$image" "$action" ||
+       ! macos_efi_prepare_raw "$vm_name" "$image" "$work_dir" raw offset; then
+        rm -rf "$work_dir"
+        return 1
+    fi
+    drive=$(macos_efi_drive "$raw" "$offset")
+    plist="$work_dir/config.plist"
+    if ! mcopy -o -i "$drive" ::/EFI/OC/config.plist "$plist"; then
+        log_message "ERROR" "Could not read EFI/OC/config.plist from OpenCore image" "$vm_name"
+        rm -rf "$work_dir"
+        return 1
+    fi
+
+    case "$action" in
+        boot-normal|boot-recovery)
+            macos_update_opencore_plist "$plist" "$action" "$resolution" "$timeout" || {
+                log_message "ERROR" "Failed to update OpenCore boot configuration" "$vm_name"
+                rm -rf "$work_dir"; return 1; }
+            ;;
+        vmhide-install)
+            [[ -d "$stage_dir/Lilu.kext" && -d "$stage_dir/VMHide.kext" ]] || {
+                log_message "ERROR" "Validated Lilu and VMHide kexts are required" "$vm_name"
+                rm -rf "$work_dir"; return 1; }
+            macos_update_opencore_plist "$plist" "$action" || {
+                log_message "ERROR" "Failed to register VMHide in OpenCore" "$vm_name"
+                rm -rf "$work_dir"; return 1; }
+            mmd -i "$drive" ::/EFI/OC/Kexts >/dev/null 2>&1 || true
+            mdeltree -i "$drive" ::/EFI/OC/Kexts/VMHide.kext >/dev/null 2>&1 || true
+            mdeltree -i "$drive" ::/EFI/OC/Kexts/Lilu.kext >/dev/null 2>&1 || true
+            mcopy -s -o -i "$drive" "$stage_dir/Lilu.kext" ::/EFI/OC/Kexts/ &&
+            mcopy -s -o -i "$drive" "$stage_dir/VMHide.kext" ::/EFI/OC/Kexts/ || {
+                log_message "ERROR" "Failed to copy VMHide kexts into the EFI" "$vm_name"
+                rm -rf "$work_dir"; return 1; }
+            mtype -i "$drive" ::/EFI/OC/Kexts/Lilu.kext/Contents/Info.plist >/dev/null 2>&1 &&
+            mtype -i "$drive" ::/EFI/OC/Kexts/VMHide.kext/Contents/Info.plist >/dev/null 2>&1 || {
+                log_message "ERROR" "EFI validation could not find the copied Lilu and VMHide kexts" "$vm_name"
+                rm -rf "$work_dir"; return 1; }
+            ;;
+        vmhide-remove)
+            macos_update_opencore_plist "$plist" "$action" || {
+                log_message "ERROR" "Failed to remove VMHide from OpenCore" "$vm_name"
+                rm -rf "$work_dir"; return 1; }
+            mdeltree -i "$drive" ::/EFI/OC/Kexts/VMHide.kext >/dev/null 2>&1 || true
+            if mtype -i "$drive" ::/EFI/OC/Kexts/VMHide.kext/Contents/Info.plist >/dev/null 2>&1; then
+                log_message "ERROR" "EFI validation found VMHide after removal" "$vm_name"
+                rm -rf "$work_dir"; return 1
+            fi
+            ;;
+        *)
+            log_message "ERROR" "Unknown OpenCore mutation: $action" "$vm_name"
+            rm -rf "$work_dir"; return 1
+            ;;
+    esac
+
+    if ! mcopy -o -i "$drive" "$plist" ::/EFI/OC/config.plist ||
+       ! macos_efi_commit_raw "$vm_name" "$raw" "$image" "$work_dir"; then
+        log_message "ERROR" "OpenCore change was not committed; the previous image remains intact" "$vm_name"
+        rm -rf "$work_dir"
+        return 1
+    fi
+    rm -rf "$work_dir"
+}
+
+macos_validate_archive_layout() {
+    local archive="$1" bundle="$2" executable="$3"
+    local list entry
+    list=$(unzip -Z1 "$archive") || return 1
+    while IFS= read -r entry; do
+        [[ -z "$entry" || "$entry" == /* || "$entry" == *"../"* || "$entry" == ".." ]] && return 1
+    done <<< "$list"
+    [[ "$list" == *"${bundle}/Contents/Info.plist"* && "$list" == *"${bundle}/Contents/MacOS/${executable}"* ]]
+}
+
+macos_release_asset() {
+    local api="$1" prefix="$2" metadata="$3"
+    local -n _url_ref="$4" _digest_ref="$5" _version_ref="$6"
+    local parsed="$metadata.parsed" resolved_url resolved_digest resolved_version
+    curl --fail --location --silent --show-error --proto '=https' --proto-redir '=https' \
+        "$api" -o "$metadata" || return 1
+    if ! python3 - "$metadata" "$prefix" > "$parsed" <<'PY'
+import json
+import sys
+
+path, prefix = sys.argv[1:]
+with open(path, encoding="utf-8") as handle:
+    release = json.load(handle)
+assets = release.get("assets", [])
+matches = [asset for asset in assets
+           if asset.get("name", "").startswith(prefix)
+           and asset.get("name", "").endswith("-RELEASE.zip")]
+if len(matches) != 1:
+    raise SystemExit("expected exactly one release archive")
+asset = matches[0]
+digest = asset.get("digest", "")
+if not isinstance(digest, str) or not digest.startswith("sha256:"):
+    raise SystemExit("release archive does not provide a SHA-256 digest")
+print(asset["browser_download_url"])
+print(digest.split(":", 1)[1].lower())
+print(release.get("tag_name", "unknown"))
+PY
+    then
+        return 1
+    fi
+    {
+        IFS= read -r resolved_url
+        IFS= read -r resolved_digest
+        IFS= read -r resolved_version
+    } < "$parsed"
+    [[ "$resolved_url" == https://* && "$resolved_digest" =~ ^[a-f0-9]{64}$ && -n "$resolved_version" ]] || return 1
+    _url_ref="$resolved_url"
+    _digest_ref="$resolved_digest"
+    _version_ref="$resolved_version"
+}
+
+macos_download_release_archive() {
+    local api="$1" prefix="$2" destination="$3" metadata_dir="$4"
+    local -n _version_ref="$5"
+    local metadata="$metadata_dir/${prefix}release.json" url digest version actual
+    macos_release_asset "$api" "$prefix" "$metadata" url digest version || {
+        log_message "ERROR" "Could not resolve a verified ${prefix} release archive"
+        return 1
+    }
+    curl --fail --location --silent --show-error --retry 2 --proto '=https' --proto-redir '=https' \
+        "$url" -o "$destination" || {
+        log_message "ERROR" "Failed to download ${prefix}${version}"
+        return 1
+    }
+    actual=$(sha256sum "$destination" | awk '{print tolower($1)}')
+    [[ "$actual" == "$digest" ]] || {
+        log_message "ERROR" "SHA-256 mismatch for ${prefix}${version}; refusing the archive"
+        return 1
+    }
+    _version_ref="$version"
+}
+
+macos_extract_release_kext() {
+    local archive="$1" bundle="$2" executable="$3" destination="$4"
+    macos_validate_archive_layout "$archive" "$bundle" "$executable" || return 1
+    unzip -qq "$archive" "${bundle}/*" -d "$destination" || return 1
+    [[ -f "$destination/$bundle/Contents/MacOS/$executable" ]] || return 1
+    file -b "$destination/$bundle/Contents/MacOS/$executable" | grep -qi 'x86_64'
+}
+
+macos_validate_vmhide_kext_metadata() {
+    local stage_dir="$1"
+    python3 - "$stage_dir/Lilu.kext/Contents/Info.plist" "$stage_dir/VMHide.kext/Contents/Info.plist" <<'PY'
+import plistlib
+import re
+import sys
+
+lilu_path, vmhide_path = sys.argv[1:]
+with open(lilu_path, "rb") as handle:
+    lilu = plistlib.load(handle)
+with open(vmhide_path, "rb") as handle:
+    vmhide = plistlib.load(handle)
+
+def version_tuple(value):
+    parts = re.findall(r"\d+", str(value))
+    if not parts:
+        raise SystemExit("invalid Lilu version")
+    return tuple(int(part) for part in (parts + ["0", "0"])[:3])
+
+if version_tuple(lilu.get("CFBundleShortVersionString", "")) < (1, 7, 0):
+    raise SystemExit("VMHide requires Lilu 1.7.0 or newer")
+libraries = vmhide.get("OSBundleLibraries", {})
+if "as.vit9696.Lilu" not in libraries:
+    raise SystemExit("VMHide kext does not declare its Lilu dependency")
+PY
+}
+
+macos_boot_configure() {
+    local vm_name="$1"; shift
+    local resolution="$MACOS_DEFAULT_RESOLUTION" timeout="$MACOS_DEFAULT_BOOT_TIMEOUT"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --resolution) [[ $# -ge 2 ]] || { log_message "ERROR" "--resolution requires WIDTHxHEIGHT"; return 1; }; resolution="$2"; shift 2 ;;
+            --timeout) [[ $# -ge 2 ]] || { log_message "ERROR" "--timeout requires seconds"; return 1; }; timeout="$2"; shift 2 ;;
+            *) log_message "ERROR" "Unknown option: $1"; return 1 ;;
+        esac
+    done
+    [[ "$resolution" =~ ^[1-9][0-9]{2,4}x[1-9][0-9]{2,4}$ ]] || {
+        log_message "ERROR" "Invalid resolution '$resolution' (use WIDTHxHEIGHT, e.g. 1920x1080)" "$vm_name"; return 1; }
+    [[ "$timeout" =~ ^[0-9]+$ && "$timeout" -le 60 ]] || {
+        log_message "ERROR" "Invalid timeout '$timeout' (must be 0-60 seconds)" "$vm_name"; return 1; }
+    require_vm "$vm_name" exists unlocked not-running || return 1
+    local -A VM=()
+    load_vm_config "$vm_name" VM || return 1
+    [[ "${VM[OS_TYPE]:-}" == "macos" ]] || { log_message "ERROR" "VM is not macOS: $vm_name" "$vm_name"; return 1; }
+    [[ "${VM[MACOS_INSTALL_MEDIA]:-0}" == "0" ]] || {
+        log_message "ERROR" "Detach installer media with macos-eject before configuring normal macOS boot" "$vm_name"; return 1; }
+    local fd
+    acquire_stopped_vm_lock "$vm_name" fd || return 1
+    local result
+    if macos_mutate_opencore_locked "$vm_name" boot-normal "$resolution" "$timeout"; then
+        result=0
+    else
+        result=$?
+    fi
+    release_flock fd "$VM_DIR/$vm_name/qemu.pid.lock"
+    [[ "$result" -eq 0 ]] && log_message "INFO" "macOS boot configured: ${resolution}, picker timeout ${timeout}s." "$vm_name"
+    return "$result"
+}
+
+macos_set_recovery_boot_locked() {
+    local vm_name="$1"
+    macos_mutate_opencore_locked "$vm_name" boot-recovery "$MACOS_DEFAULT_RESOLUTION" "$MACOS_DEFAULT_BOOT_TIMEOUT"
+}
+
+macos_vmhide() {
+    local vm_name="$1" action="${2:-}"
+    [[ -n "$action" && $# -eq 2 ]] || {
+        log_message "ERROR" "Usage: macos-vmhide <name> install|remove|status"; return 1; }
+    require_vm "$vm_name" exists || return 1
+    local -A VM=()
+    load_vm_config "$vm_name" VM || return 1
+    [[ "${VM[OS_TYPE]:-}" == "macos" ]] || { log_message "ERROR" "VM is not macOS: $vm_name" "$vm_name"; return 1; }
+
+    case "$action" in
+        install)
+            require_vm "$vm_name" unlocked not-running || return 1
+            [[ "${VM[MACOS_INSTALL_MEDIA]:-0}" == "0" ]] || {
+                log_message "ERROR" "Install VMHide only after macos-eject completes" "$vm_name"; return 1; }
+            require_commands curl unzip sha256sum file || return 1
+            macos_require_efi_tools || return 1
+            local fd workspace lilu_version vmhide_version
+            acquire_stopped_vm_lock "$vm_name" fd || return 1
+            workspace=$(mktemp -d "$VM_DIR/$vm_name/macos/.vmhide.XXXXXX") || {
+                release_flock fd "$VM_DIR/$vm_name/qemu.pid.lock"; return 1; }
+            chmod 700 "$workspace" 2>/dev/null || true
+            if ! macos_download_release_archive "$LILU_RELEASE_API" "Lilu-" "$workspace/Lilu.zip" "$workspace" lilu_version ||
+               ! macos_download_release_archive "$VMHIDE_RELEASE_API" "VMHide-" "$workspace/VMHide.zip" "$workspace" vmhide_version ||
+               ! macos_extract_release_kext "$workspace/Lilu.zip" "Lilu.kext" "Lilu" "$workspace/kexts" ||
+               ! macos_extract_release_kext "$workspace/VMHide.zip" "VMHide.kext" "VMHide" "$workspace/kexts" ||
+               ! macos_validate_vmhide_kext_metadata "$workspace/kexts" ||
+               ! macos_mutate_opencore_locked "$vm_name" vmhide-install "" "" "$workspace/kexts"; then
+                rm -rf "$workspace"
+                release_flock fd "$VM_DIR/$vm_name/qemu.pid.lock"
+                return 1
+            fi
+            printf 'VMHIDE_VERSION=%q\nLILU_VERSION=%q\n' "$vmhide_version" "$lilu_version" > "$VM_DIR/$vm_name/macos/vmhide.env"
+            chmod 600 "$VM_DIR/$vm_name/macos/vmhide.env"
+            rm -rf "$workspace"
+            release_flock fd "$VM_DIR/$vm_name/qemu.pid.lock"
+            log_message "INFO" "VMHide ${vmhide_version} and Lilu ${lilu_version} installed. Restart the VM to load them." "$vm_name"
+            ;;
+        remove)
+            require_vm "$vm_name" unlocked not-running || return 1
+            macos_require_efi_tools || return 1
+            local fd_remove
+            acquire_stopped_vm_lock "$vm_name" fd_remove || return 1
+            local result
+            if macos_mutate_opencore_locked "$vm_name" vmhide-remove; then
+                result=0
+            else
+                result=$?
+            fi
+            if [[ "$result" -eq 0 ]]; then
+                rm -f "$VM_DIR/$vm_name/macos/vmhide.env"
+            fi
+            release_flock fd_remove "$VM_DIR/$vm_name/qemu.pid.lock"
+            [[ "$result" -eq 0 ]] && log_message "INFO" "VMHide removed. Lilu was retained; restart the VM." "$vm_name"
+            return "$result"
+            ;;
+        status)
+            macos_vmhide_status "$vm_name"
+            ;;
+        *) log_message "ERROR" "Unknown VMHide action: $action (use install|remove|status)" "$vm_name"; return 1 ;;
+    esac
+}
+
+macos_vmhide_status() {
+    local vm_name="$1" image work_dir raw offset drive plist lilu_info vmhide_info
+    macos_require_efi_tools || return 1
+    macos_opencore_image "$vm_name" image || return 1
+    work_dir=$(mktemp -d "$VM_DIR/$vm_name/macos/.vmhide-status.XXXXXX") || return 1
+    chmod 700 "$work_dir" 2>/dev/null || true
+    if ! macos_efi_prepare_raw "$vm_name" "$image" "$work_dir" raw offset; then
+        rm -rf "$work_dir"; return 1
+    fi
+    drive=$(macos_efi_drive "$raw" "$offset")
+    plist="$work_dir/config.plist"
+    lilu_info="$work_dir/Lilu-Info.plist"
+    vmhide_info="$work_dir/VMHide-Info.plist"
+    mcopy -o -i "$drive" ::/EFI/OC/config.plist "$plist" || { rm -rf "$work_dir"; return 1; }
+    mcopy -o -i "$drive" ::/EFI/OC/Kexts/Lilu.kext/Contents/Info.plist "$lilu_info" 2>/dev/null || true
+    mcopy -o -i "$drive" ::/EFI/OC/Kexts/VMHide.kext/Contents/Info.plist "$vmhide_info" 2>/dev/null || true
+    if ! python3 - "$plist" "$lilu_info" "$vmhide_info" <<'PY'
+import os
+import plistlib
+import sys
+
+config_path, lilu_path, vmhide_path = sys.argv[1:]
+with open(config_path, "rb") as handle:
+    config = plistlib.load(handle)
+entries = config.get("Kernel", {}).get("Add", [])
+paths = [entry.get("BundlePath") for entry in entries if isinstance(entry, dict) and entry.get("Enabled")]
+def version(path):
+    if not os.path.isfile(path):
+        return "missing"
+    with open(path, "rb") as handle:
+        return str(plistlib.load(handle).get("CFBundleShortVersionString", "unknown"))
+lilu_ok = "Lilu.kext" in paths
+vmhide_ok = "VMHide.kext" in paths
+order_ok = lilu_ok and vmhide_ok and paths.index("Lilu.kext") < paths.index("VMHide.kext")
+print(f"Lilu: {version(lilu_path)} ({'registered' if lilu_ok else 'not registered'})")
+print(f"VMHide: {version(vmhide_path)} ({'registered' if vmhide_ok else 'not registered'})")
+print(f"Load order: {'Lilu before VMHide' if order_ok else 'invalid or incomplete'}")
+PY
+    then
+        rm -rf "$work_dir"
+        return 1
+    fi
+    rm -rf "$work_dir"
+}
+
+macos_efi_restore() {
+    local vm_name="$1" backup_name="$2"
+    [[ "$backup_name" =~ ^OpenCore\.[A-Za-z0-9_-]+\.[0-9]{8}T[0-9]{6}Z(\.[0-9]+)?\.qcow2$ ]] || {
+        log_message "ERROR" "Backup name must be a file listed in macos/backups" "$vm_name"; return 1; }
+    require_vm "$vm_name" exists unlocked not-running || return 1
+    local -A VM=()
+    load_vm_config "$vm_name" VM || return 1
+    [[ "${VM[OS_TYPE]:-}" == "macos" ]] || { log_message "ERROR" "VM is not macOS: $vm_name" "$vm_name"; return 1; }
+    local backup="$VM_DIR/$vm_name/macos/backups/$backup_name" image fd candidate
+    [[ -f "$backup" ]] || { log_message "ERROR" "OpenCore backup not found: $backup_name" "$vm_name"; return 1; }
+    qemu-img check -q "$backup" >/dev/null || { log_message "ERROR" "Backup image is invalid: $backup_name" "$vm_name"; return 1; }
+    acquire_stopped_vm_lock "$vm_name" fd || return 1
+    macos_private_opencore_image "$vm_name" image || { release_flock fd "$VM_DIR/$vm_name/qemu.pid.lock"; return 1; }
+    candidate="$image.restore.${BASHPID}"
+    cp --reflink=auto --preserve=mode "$backup" "$candidate" && mv -f "$candidate" "$image" || {
+        rm -f "$candidate"
+        release_flock fd "$VM_DIR/$vm_name/qemu.pid.lock"
+        log_message "ERROR" "Failed to restore OpenCore backup" "$vm_name"
+        return 1
+    }
+    release_flock fd "$VM_DIR/$vm_name/qemu.pid.lock"
+    log_message "INFO" "Restored OpenCore backup: $backup_name" "$vm_name"
+}
+
 configure_macos_guest_agent() {
     local vm_name="$1"
     local -n _mga_vm="$2"
@@ -1845,6 +2439,7 @@ install_macos() {
 macos_finalize_install() {
     local vm_name="$1"
     require_vm "$vm_name" exists unlocked not-running || return 1
+    macos_require_efi_tools || return 1
     local fd
     acquire_stopped_vm_lock "$vm_name" fd || return 1
     local -A VM=()
@@ -1859,11 +2454,6 @@ macos_finalize_install() {
         release_flock fd "$VM_DIR/$vm_name/qemu.pid.lock"
         log_message "INFO" "macOS installer media is already detached." "$vm_name"; return 0
     fi
-    VM[MACOS_INSTALL_MEDIA]=0
-    if ! save_vm_config "$vm_name" VM; then
-        release_flock fd "$VM_DIR/$vm_name/qemu.pid.lock"; return 1
-    fi
-
     # After a successful install the recovery image and the full OSX-KVM git
     # checkout are no longer required for normal boots. Keep only the permanent
     # OpenCore + 4 MiB OVMF assets under macos/assets/, then drop the temporary
@@ -1876,13 +2466,33 @@ macos_finalize_install() {
         [[ -f "$repo/OVMF_CODE_4M.fd" ]] && cp -n "$repo/OVMF_CODE_4M.fd" "$macos_dir/assets/OVMF_CODE_4M.fd" 2>/dev/null || true
         [[ -f "$repo/OVMF_VARS-1920x1080.fd" ]] && cp -n "$repo/OVMF_VARS-1920x1080.fd" "$macos_dir/assets/OVMF_VARS-1920x1080.fd" 2>/dev/null || true
         chmod 600 "$macos_dir/assets"/* 2>/dev/null || true
+    fi
+
+    # Configure the now-private OpenCore image before detaching recovery.  This
+    # keeps EFI entries out of the normal picker while preserving the recovery
+    # profile that macos-recovery can restore later.
+    if ! macos_mutate_opencore_locked "$vm_name" boot-normal "$MACOS_DEFAULT_RESOLUTION" "$MACOS_DEFAULT_BOOT_TIMEOUT"; then
+        release_flock fd "$VM_DIR/$vm_name/qemu.pid.lock"
+        return 1
+    fi
+
+    VM[MACOS_INSTALL_MEDIA]=0
+    if ! save_vm_config "$vm_name" VM; then
+        # A failed state save must not strand the still-attached installer
+        # behind the normal boot scan policy.
+        macos_set_recovery_boot_locked "$vm_name" || true
+        release_flock fd "$VM_DIR/$vm_name/qemu.pid.lock"
+        return 1
+    fi
+
+    if [[ -d "$repo" ]]; then
         rm -rf "$repo"
         log_message "INFO" "Removed temporary OSX-KVM checkout and recovery download artifacts." "$vm_name"
     fi
     rm -f "$macos_dir"/BaseSystem.img "$macos_dir"/BaseSystem.dmg "$macos_dir"/*.chunklist 2>/dev/null || true
 
     release_flock fd "$VM_DIR/$vm_name/qemu.pid.lock"
-    log_message "INFO" "macOS installer media detached. The VM will now boot the installed disk through OpenCore." "$vm_name"
+    log_message "INFO" "macOS installer media detached. The VM will auto-boot the installed disk through OpenCore after ${MACOS_DEFAULT_BOOT_TIMEOUT}s." "$vm_name"
 }
 
 macos_recovery_attach() {
@@ -1891,6 +2501,7 @@ macos_recovery_attach() {
     local -A VM=()
     load_vm_config "$vm_name" VM || return 1
     [[ "${VM[OS_TYPE]:-}" == "macos" ]] || { log_message "ERROR" "VM is not macOS: $vm_name" "$vm_name"; return 1; }
+    macos_require_efi_tools || return 1
     local base="$VM_DIR/$vm_name/macos/OSX-KVM/BaseSystem.img"
     if [[ ! -f "$base" ]]; then
         log_message "INFO" "Recovery media was cleaned up after install. Re-preparing via macos-install..." "$vm_name"
@@ -1898,6 +2509,16 @@ macos_recovery_attach() {
         install_macos "$vm_name" --version "${VM[MACOS_VERSION]:-sonoma}" --no-start || return 1
         base="$VM_DIR/$vm_name/macos/OSX-KVM/BaseSystem.img"
         [[ -f "$base" ]] || { log_message "ERROR" "Failed to restore recovery media." "$vm_name"; return 1; }
+        # The re-prepared installer has a permissive upstream configuration;
+        # explicitly restore it in case this VM previously used managed boot.
+        local reprepare_fd
+        acquire_stopped_vm_lock "$vm_name" reprepare_fd || return 1
+        if ! macos_set_recovery_boot_locked "$vm_name"; then
+            release_flock reprepare_fd "$VM_DIR/$vm_name/qemu.pid.lock"
+            return 1
+        fi
+        release_flock reprepare_fd "$VM_DIR/$vm_name/qemu.pid.lock"
+        log_message "INFO" "macOS recovery media attached and OpenCore recovery scanning restored." "$vm_name"
         return 0
     fi
     # Assigned indirectly by acquire_stopped_vm_lock through a nameref.
@@ -1907,12 +2528,18 @@ macos_recovery_attach() {
     if ! load_vm_config "$vm_name" VM; then
         release_flock fd "$VM_DIR/$vm_name/qemu.pid.lock"; return 1
     fi
+    if ! macos_set_recovery_boot_locked "$vm_name"; then
+        release_flock fd "$VM_DIR/$vm_name/qemu.pid.lock"; return 1
+    fi
     VM[MACOS_INSTALL_MEDIA]=1
     save_vm_config "$vm_name" VM || {
+        # The VM was previously in normal boot mode, so restore that profile if
+        # the config state cannot be made durable.
+        macos_mutate_opencore_locked "$vm_name" boot-normal "$MACOS_DEFAULT_RESOLUTION" "$MACOS_DEFAULT_BOOT_TIMEOUT" || true
         release_flock fd "$VM_DIR/$vm_name/qemu.pid.lock"; return 1
     }
     release_flock fd "$VM_DIR/$vm_name/qemu.pid.lock"
-    log_message "INFO" "macOS recovery media attached." "$vm_name"
+    log_message "INFO" "macOS recovery media attached and OpenCore recovery scanning restored." "$vm_name"
 }
 
 macos_doctor() {
@@ -1975,6 +2602,19 @@ macos_doctor() {
     [[ "$qdevs" == *"isa-applesmc"* ]] || { log_message "ERROR" "QEMU lacks isa-applesmc device support." "$vm_name"; failures=1; }
     [[ "$qdevs" == *"vmware-svga"* ]] || { log_message "ERROR" "QEMU lacks vmware-svga device support." "$vm_name"; failures=1; }
     [[ "$qdevs" == *"qemu-xhci"* ]] || { log_message "ERROR" "QEMU lacks qemu-xhci device support." "$vm_name"; failures=1; }
+
+    if command -v mcopy >/dev/null 2>&1 && command -v mmd >/dev/null 2>&1 &&
+       command -v mdeltree >/dev/null 2>&1 && command -v mtype >/dev/null 2>&1; then
+        log_message "INFO" "OK: mtools available for managed OpenCore EFI changes" "$vm_name"
+    else
+        log_message "WARNING" "mtools is missing; macos-eject, macos-recovery, and macos-boot cannot manage the OpenCore EFI" "$vm_name"
+    fi
+    if command -v curl >/dev/null 2>&1 && command -v unzip >/dev/null 2>&1 &&
+       command -v file >/dev/null 2>&1 && command -v sha256sum >/dev/null 2>&1; then
+        log_message "INFO" "VMHide release-verification tools are available" "$vm_name"
+    else
+        log_message "INFO" "VMHide installation also needs curl, unzip, file, and sha256sum" "$vm_name"
+    fi
 
     if [[ "${VM[MACOS_GUEST_AGENT]:-1}" == "1" ]]; then
         [[ "$qdevs" == *"isa-serial"* ]] || {
@@ -3169,7 +3809,9 @@ start() {
         if [[ "$headless" == "1" ]]; then
             qemu_cmd+=("-display" "none")
         else
-            qemu_cmd+=("-device" "vmware-svga" "-display" "default")
+            # 64 MiB by default is ample for the managed 1920x1080 mode and
+            # still leaves users free to raise VRAM_SIZE_MB for larger displays.
+            qemu_cmd+=("-device" "vmware-svga,vgamem_mb=${VM[VRAM_SIZE_MB]:-64}" "-display" "default")
         fi
         configure_macos_disk "$vm_name" VM qemu_cmd || return 1
     else
@@ -4064,6 +4706,12 @@ MACOS
       Also removes the temporary OSX-KVM checkout and recovery download artifacts.
   macos-recovery <name>
       Re-attach recovery media (re-downloads if previously cleaned up by eject).
+  macos-boot     <name> [--resolution WIDTHxHEIGHT] [--timeout SECONDS]
+      Configure normal OpenCore boot (default: 1920x1080, five-second picker).
+  macos-vmhide   <name> install|remove|status
+      Manage the opt-in VMHide and Lilu OpenCore kexts for an installed VM.
+  macos-efi-restore <name> <backup-file>
+      Restore a named OpenCore image from macos/backups/.
   macos-refresh  <name>
       Update (or re-clone) the VM's isolated OSX-KVM checkout.
   macos-doctor   <name>
@@ -4112,6 +4760,9 @@ main() {
         macos-install) [[ $# -eq 0 ]] && { echo "Error: VM name required"; exit 1; }; install_macos "$@" ;;
         macos-eject)   [[ $# -eq 0 ]] && { echo "Error: VM name required"; exit 1; }; macos_finalize_install "$@" ;;
         macos-recovery) [[ $# -eq 0 ]] && { echo "Error: VM name required"; exit 1; }; macos_recovery_attach "$@" ;;
+        macos-boot)    [[ $# -eq 0 ]] && { echo "Error: VM name required"; exit 1; }; macos_boot_configure "$@" ;;
+        macos-vmhide)  [[ $# -lt 2 ]] && { echo "Error: VM name and action required"; exit 1; }; macos_vmhide "$@" ;;
+        macos-efi-restore) [[ $# -ne 2 ]] && { echo "Error: VM name and backup file required"; exit 1; }; macos_efi_restore "$@" ;;
         macos-refresh) [[ $# -eq 0 ]] && { echo "Error: VM name required"; exit 1; }; macos_refresh_repo "$@" ;;
         macos-doctor)  [[ $# -eq 0 ]] && { echo "Error: VM name required"; exit 1; }; macos_doctor "$@" ;;
         start)         [[ $# -eq 0 ]] && { echo "Error: VM name required"; exit 1; }; start       "$@" ;;

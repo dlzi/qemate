@@ -1,4 +1,4 @@
-.TH QEMATE 1 "October 9, 2026" "qemate 6.0.0" "User Commands"
+.TH QEMATE 1 "October 10, 2026" "qemate 6.0.0" "User Commands"
 .SH NAME
 qemate \- Hardened QEMU virtual machine manager for Linux
 .SH SYNOPSIS
@@ -154,11 +154,23 @@ Prepare an Apple recovery installer via kholia/OSX-KVM and start the VM by defau
 
 .TP
 .B macos-eject NAME
-Detach recovery media after installation so subsequent boots use the installed disk through OpenCore. Also removes the temporary OSX-KVM checkout and recovery download artefacts, keeping permanent OpenCore and 4 MiB OVMF assets under \fBmacos/assets/\fR.
+Detach recovery media after installation so subsequent boots use the installed disk through OpenCore. Configures the private OpenCore EFI for a 1920x1080 boot screen, a five-second picker, and normal installed-system scanning without raw EFI entries. Also removes the temporary OSX-KVM checkout and recovery download artefacts, keeping permanent OpenCore and 4 MiB OVMF assets under \fBmacos/assets/\fR. Requires mtools.
 
 .TP
 .B macos-recovery NAME
 Re-attach recovery media for maintenance or reinstallation. Re-prepares media via \fBmacos-install\fR if it was cleaned up by eject.
+
+.TP
+.B macos-boot NAME [--resolution WIDTHxHEIGHT] [--timeout SECONDS]
+Configure the stopped installed VM's private OpenCore image for normal boots. The defaults are \fB1920x1080\fR and a five-second visible picker. The normal scan policy excludes raw EFI entries. The final macOS desktop resolution is selected inside macOS System Settings -> Displays.
+
+.TP
+.B macos-vmhide NAME install|remove|status
+Manage opt-in experimental VMHide and Lilu kexts in the stopped installed VM's private OpenCore EFI. Install downloads release builds, verifies the published SHA-256 digests, checks the VMHide x86_64 executable, and registers Lilu before VMHide. It does not enable VMHide debug, strict, or logging boot arguments. Verify guest behavior after installation; remove VMHide or restore an EFI backup if a regression occurs.
+
+.TP
+.B macos-efi-restore NAME BACKUP-FILE
+Restore the stopped VM's private OpenCore image from a named qcow2 backup in \fBmacos/backups/\fR. BACKUP-FILE must be a basename produced by qemate, not a path.
 
 .TP
 .B macos-refresh NAME
@@ -180,7 +192,7 @@ qemate macos-doctor mac-dev
 qemate start mac-dev
 .EE
 .PP
-In macOS Recovery, identify the target disk by the dedicated partition's expected size before erasing it as APFS; \fBMacHDD\fR is qemate's QEMU drive identifier, not a guaranteed Disk Utility label. If another displayed disk has the same size or the target cannot be identified with certainty, stop. After installation, stop the VM, run \fBmacos-eject mac-dev\fR, and start it again. Physical-disk VMs cannot be cloned or resized. Deleting the qemate VM removes its metadata but does not erase the host partition.
+In the first graphical boot, choose the macOS recovery/installer entry if OpenCore displays a boot picker. In Recovery, open Disk Utility and choose \fBView > Show All Devices\fR. Identify the target disk by the dedicated partition's expected size before erasing it as APFS; if Disk Utility offers a scheme selector, choose GUID Partition Map. \fBMacHDD\fR is qemate's QEMU drive identifier, not a guaranteed Disk Utility label. If another displayed disk has the same size or the target cannot be identified with certainty, stop. Quit Disk Utility, choose Install macOS, and select the new APFS volume. Keep recovery media attached through all installer restarts and the Setup Assistant. After setup reaches the desktop, stop the VM, run \fBmacos-eject mac-dev\fR, and start it again. Physical-disk VMs cannot be cloned or resized. Deleting the qemate VM removes its metadata but does not erase the host partition.
 
 .SS Port Forwarding
 .TP
@@ -367,7 +379,7 @@ qemate resize myvm +20G
 .EE
 
 .SH MACOS NOTES
-Qemate supports x86_64 macOS guests using the OpenCore/recovery workflow from kholia/OSX-KVM. KVM acceleration and \fBignore_msrs=1\fR are required. After installation, install the guest-side mac-guest-agent (ISA serial) and optionally the VMHide Lilu plug-in; see the README for details.
+Qemate supports x86_64 macOS guests using the OpenCore/recovery workflow from kholia/OSX-KVM. KVM acceleration and \fBignore_msrs=1\fR are required. After installation, install the guest-side mac-guest-agent (ISA serial). VMHide is managed only through the explicit experimental \fBmacos-vmhide\fR command; see the README for guest-level verification requirements.
 
 .SH AUTHOR
 Developed by Daniel Zilli.
