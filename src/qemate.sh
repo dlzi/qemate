@@ -2139,7 +2139,10 @@ macos_mutate_opencore_locked() {
             macos_update_opencore_plist "$plist" "$action" || {
                 log_message "ERROR" "Failed to register VMHide in OpenCore" "$vm_name"
                 rm -rf "$work_dir"; return 1; }
-            mmd -i "$drive" ::/EFI/OC/Kexts >/dev/null 2>&1 || true
+            # mmd prompts when the directory already exists.  EFI mutations
+            # run from an interactive shell, so detach stdin as well as hiding
+            # the expected "already exists" diagnostic.
+            mmd -i "$drive" ::/EFI/OC/Kexts </dev/null >/dev/null 2>&1 || true
             mdeltree -i "$drive" ::/EFI/OC/Kexts/VMHide.kext >/dev/null 2>&1 || true
             mdeltree -i "$drive" ::/EFI/OC/Kexts/Lilu.kext >/dev/null 2>&1 || true
             mcopy -s -o -i "$drive" "$stage_dir/Lilu.kext" ::/EFI/OC/Kexts/ &&
