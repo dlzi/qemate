@@ -115,7 +115,7 @@ Qemate uses the syntax: `qemate <command> [vm] [options]`.
   - `--memory SIZE` — e.g. `4G`, `8G`
   - `--cores N` — CPU cores (1–64)
   - `--disk-size SIZE` — e.g. `60G` (creates a qcow2 image; default)
-  - `--disk-dev PATH` — e.g. `/dev/sdb` (raw physical block device; mutually exclusive with `--disk-size`). These VMs cannot be resized or cloned; the disk is the host device itself.
+  - `--disk-dev PATH` — e.g. `/dev/sdb` (raw physical block device; mutually exclusive with `--disk-size`). The recorded size is whole GiB when the byte count divides evenly, otherwise MiB rounded up. These VMs cannot be resized or cloned; the disk is the host device itself.
   - `--machine TYPE[,accel=kvm|tcg]` — e.g. `pc-q35-11.0,accel=kvm`
   - `--enable-audio` / `--no-audio` — emulated Intel HDA; set `AUDIO_PASSTHROUGH_PCI` for VFIO passthrough
   - `--enable-tpm` / `--no-tpm` — TPM 2.0 (requires swtpm; default on for Windows)
@@ -125,7 +125,7 @@ Qemate uses the syntax: `qemate <command> [vm] [options]`.
   - `--profile balanced|performance` — defaults to `balanced`; performance favors low latency and throughput. Creating with `--profile performance` validates available RAM and the process memlock limit up front.
 
 - `qemate start <n> [--headless] [--detach] [--iso PATH] [--virtio-iso PATH] [--debug] [--dry-run]`
-  Starts a VM, optionally without a graphical console (`--headless`) or under a detached lifecycle supervisor (`--detach`), with a primary ISO and/or a secondary ISO (e.g. VirtIO-Win drivers). `--debug` prints the shell-escaped QEMU command before a foreground launch and relays it before a detached caller returns; `--dry-run` prints it without binding devices or starting helpers. Log rotation runs automatically on each start. If `--detach` is used with neither `DISPLAY` nor `WAYLAND_DISPLAY` set, qemate implies `--headless` so QEMU does not fail opening a GUI. Locked VMs cannot be started.
+  Starts a VM, optionally without a GTK/SDL console (`--headless`) or under a detached lifecycle supervisor (`--detach`), with a primary ISO and/or a secondary ISO (e.g. VirtIO-Win drivers). On Linux and Windows, `--headless` still attaches SPICE when `SPICE_ENABLED=1`. macOS never attaches SPICE. `--debug` prints the shell-escaped QEMU command before a foreground launch and relays it before a detached caller returns; `--dry-run` prints it without binding devices or starting helpers. Log rotation runs automatically on each start. If `--detach` is used with neither `DISPLAY` nor `WAYLAND_DISPLAY` set, qemate implies `--headless` so QEMU does not fail opening a GUI. Locked VMs cannot be started. Linux and Windows attach a VirtIO serial guest agent at `sockets/qga.sock` when `ENABLE_GUEST_AGENT=1` (the default). macOS uses `MACOS_GUEST_AGENT` and an ISA serial socket instead.
 
 - `qemate stop <n> [--timeout SECONDS] [--force]`
   Requests an orderly ACPI shutdown through QMP and waits 60 seconds by default. A guest that ignores the request is left running; `--force` is the explicit hard-power-off path.
@@ -147,19 +147,19 @@ Qemate uses the syntax: `qemate <command> [vm] [options]`.
   - **linked** (default): new qcow2 whose backing file is the source disk (fast; shares unchanged clusters). Deleting or shrinking the source disk breaks the clone.
   - **`--full`**: standalone full copy of the disk.
 
-  UEFI NVRAM and TPM state are copied when present. VMs that use a **host block device** (`DISK_DEV` / `--disk-dev`) cannot be cloned. There is no private image file to copy, and two VMs must not share the same physical disk. Create another VM with its own `--disk-dev` path if you need a second physical-disk guest.
+  UEFI NVRAM and TPM state are copied when present. A macOS clone does not receive recovery media: `MACOS_INSTALL_MEDIA` is cleared, and permanent OpenCore assets under `macos/assets/` are copied only when that directory exists. Reattach recovery with `macos-recovery` or `macos-install`. VMs that use a **host block device** (`DISK_DEV` / `--disk-dev`) cannot be cloned. There is no private image file to copy, and two VMs must not share the same physical disk. Create another VM with its own `--disk-dev` path if you need a second physical-disk guest.
 
 - `qemate delete <n> [--force]`
   Deletes a VM and all its data. Prompts for confirmation unless `--force` is used. Locked VMs require `--force`.
 
 - `qemate resize <n> <SIZE|+SIZE> [--force]`
-  Resizes the VM's disk image (e.g. `80G`, `+20G`). The VM must be stopped and unlocked; `--force` is reserved for CLI compatibility and does not allow live qcow2 resizing. Not supported for physical device VMs (`--disk-dev`). The recorded size keeps exact GiB when divisible, otherwise stores MiB.
+  Resizes the VM's disk image (e.g. `80G`, `+20G`). The VM must be stopped and unlocked. `--force` may appear before or after the size; it is a compatibility no-op and does not resize a running disk. Not supported for physical device VMs (`--disk-dev`). The recorded size keeps exact GiB when divisible, otherwise stores MiB.
 
 - `qemate list`
-  Lists all VMs with seven columns: `NAME`, `STATUS`, `LOCKED`, `OS`, `AUDIO`, `TPM`, `SPICE`. Uses a lightweight config read path (no full validation lock per row).
+  Lists all VMs with seven columns: `NAME`, `STATUS`, `LOCKED`, `OS`, `AUDIO`, `TPM`, `SPICE`. `STATUS` is `running`, `stopped`, or `busy` (the lifecycle lock is held, for example during a macOS recovery download). macOS rows show the devices the OpenCore path actually attaches: audio on, TPM off, SPICE off. Uses a lightweight config read path (no full validation lock per row).
 
 - `qemate status <n>`
-  Displays detailed VM configuration and runtime status, including CPU, memory, disk, network, UEFI state, share backend, port forwards, USB passthrough, and shared folders.
+  Displays detailed VM configuration and runtime status, including CPU, memory, disk, network, audio, TPM, SPICE, guest agent, UEFI state, share backend, port forwards, USB passthrough, and shared folders. A lifecycle lock with no running QEMU process is reported as busy. For macOS, CPU, disk interface, video, audio, TPM, and SPICE are the OpenCore devices, with a note when the stored keys differ.
 
 - `qemate tune <n> balanced|performance`
   Changes only the runtime performance profile (`PERFORMANCE_PROFILE`) without replacing custom disk, network, passthrough, or share settings. The VM must be stopped. For multi-field edits, use `configure`.
@@ -179,7 +179,7 @@ Qemate uses the syntax: `qemate <command> [vm] [options]`.
   | `CPU_TYPE`             | QEMU CPU model                                          | `host`                   |
   | `MACHINE_TYPE`         | Machine type                                            | `pc-q35-11.0`            |
   | `MACHINE_OPTIONS`      | Machine options                                         | `accel=kvm`              |
-  | `NETWORK_TYPE`         | Network backend (`user`, `passt`, `tap`, `none`)        | `user`                   |
+  | `NETWORK_TYPE`         | Network backend (`user`, `nat`, `passt`, `tap`, `none`). `nat` is an alias of `user`. | `user` |
   | `NETWORK_MODEL`        | NIC model (`virtio-net-pci`, `e1000`)                   | `virtio-net-pci`         |
   | `BRIDGE_NAME`          | Host bridge interface (tap mode only)                   | `br0`                    |
   | `PORT_FORWARDS`        | Comma-separated forward specs                           | `8080:80:tcp,53:53:udp`  |
@@ -191,7 +191,7 @@ Qemate uses the syntax: `qemate <command> [vm] [options]`.
   | `DISK_CACHE`           | Disk cache mode                                         | `writeback`              |
   | `DISK_IO`              | Disk I/O mode                                           | `io_uring`               |
   | `DISK_DISCARD`         | Discard/TRIM mode                                       | `unmap`                  |
-  | `ENABLE_VIRTIO`        | Enable VirtIO stack (`0`/`1`)                           | `1`                      |
+  | `ENABLE_VIRTIO`        | `0` switches virtio-vga/virtio-gpu to std VGA and virtio-net-pci to e1000. Disk, balloon, rng, tablet, and the guest agent are unchanged (`0`/`1`). | `1` |
   | `MEMORY_PREALLOC`      | Pre-allocate memory (`0`/`1`)                           | `0`                      |
   | `MEMORY_SHARE`         | Shared memory backend for VirtIO-FS (`0`/`1`)           | `0`                      |
   | `ENABLE_AUDIO`         | Enable emulated HDA (`0`/`1`); VFIO if PCI set          | `1`                      |
@@ -202,7 +202,8 @@ Qemate uses the syntax: `qemate <command> [vm] [options]`.
   | `ENABLE_TPM`           | Enable TPM 2.0 (`0`/`1`)                                | `1`                      |
   | `SPICE_ENABLED`        | Enable SPICE display (`0`/`1`)                          | `0`                      |
   | `SPICE_PORT`           | SPICE port (default: 5930)                              | `5930`                   |
-  | `ENABLE_UEFI`          | Enable UEFI firmware (`0`/`1`)                          | `1`                      |
+  | `ENABLE_UEFI`          | Enable UEFI firmware (`0`/`1`). macOS always boots OpenCore UEFI. | `1` |
+  | `ENABLE_GUEST_AGENT`  | Linux/Windows VirtIO guest agent socket `sockets/qga.sock` (`0`/`1`) | `1` |
   | `MACOS_VERSION`        | macOS recovery version for macOS VMs                    | `sonoma`                 |
   | `MACOS_INSTALL_MEDIA`  | Recovery/installer media attached (`0`/`1`)             | `0`                      |
   | `MACOS_GUEST_AGENT`    | ISA-serial macOS guest agent transport (`0`/`1`)        | `1`                      |
@@ -210,6 +211,8 @@ Qemate uses the syntax: `qemate <command> [vm] [options]`.
   | `HIDE_KVM`             | Hide KVM signature for legacy compatibility (`0`/`1`)   | `0`                      |
   | `CPU_AFFINITY`         | Optional Linux CPU list for the whole QEMU process      | empty                    |
   | `LOCKED`               | VM lock state (`0`/`1`)                                 | `0`                      |
+
+On macOS, `ENABLE_TPM`, `SPICE_ENABLED`, `DISK_INTERFACE`, `VIDEO_TYPE`, `CPU_TYPE`, `HIDE_KVM`, and `ENABLE_UEFI` are stored but the OpenCore path does not apply them. `start` warns when they differ from that path. `ENABLE_AUDIO=0` does not remove the Intel HDA device.
 
 ### macOS Commands
 
@@ -301,7 +304,8 @@ Set the backend via `qemate configure <n>` (edit `SHARE_BACKEND`):
 
 | Backend    | Description                                                   | Guest mount                                                           |
 |------------|---------------------------------------------------------------|-----------------------------------------------------------------------|
-| `auto`     | Picks best available: virtiofs > virtfs (Linux) / smb (Windows) | —                                                                  |
+| `auto`     | Picks best available: virtiofs > virtfs (Linux) / smb (Windows). macOS always uses SMB. | — |
+
 | `virtfs`   | 9P filesystem, Linux guests, no extra dependencies            | `mount -t 9p -o trans=virtio,version=9p2000.L <tag> /mnt/<tag>`      |
 | `smb`      | QEMU user-mode SMB, Windows plug-and-play, one folder only; requires host `smbd` and `NETWORK_TYPE=user`/`nat` | `\\10.0.2.4\qemu` in Explorer |
 | `virtiofs` | Best performance, multiple folders; requires virtiofsd        | Windows: WinFSP + VirtIO-FS driver; Linux: `mount -t virtiofs <tag> /mnt/<tag>` |
@@ -311,7 +315,7 @@ Set the backend via `qemate configure <n>` (edit `SHARE_BACKEND`):
 Port forwarding:
 
 - `qemate port-add <n> <[ip:]host:guest[:tcp|udp]>`
-  Adds a port forward. Protocol defaults to `tcp` if omitted. The host port is checked for conflicts at add time (and again at start).
+  Adds a port forward. Protocol defaults to `tcp` if omitted. The host port is checked for conflicts at add time (and again at start). If `ss` from iproute2 is missing, qemate warns once and skips that check.
 
 - `qemate port-remove <n> <[ip:]host:guest[:tcp|udp]>`
   Removes a port forward.
@@ -322,7 +326,7 @@ Network type, model, and bridge are configured via `qemate configure <n>` (edit 
 
 | Type    | Description                                           |
 |---------|-------------------------------------------------------|
-| `user`  | SLiRP userspace NAT — default, no setup required      |
+| `user`  | SLiRP userspace NAT — default, no setup required. `nat` is the same backend. |
 | `passt` | Unprivileged, uses host network stack directly         |
 | `tap`   | Kernel-accelerated with vhost-net, optionally bridges to a host bridge |
 | `none`  | No network interface                                  |
@@ -603,7 +607,7 @@ Not every qemate feature maps onto the OpenCore/QEMU device set. The start path 
 | Network (`user`/`nat`, `passt`, `tap`, `none`) | Yes | Same `configure_network` path as Linux/Windows. Default NIC is `virtio-net-pci`; High Sierra is forced to `vmxnet3`. Port forwards work on `user`/`passt`. |
 | Port forwarding | Yes | `qemate port-add` / `port-remove`. Guest must have a working NIC. |
 | USB passthrough | Yes | `qemate usb-add <n> vendor:product` attaches `usb-host` to the existing `qemu-xhci` (`xhci.0`). Permission to claim the host device is still required. |
-| Shared folders | Partial | There is no supported macOS guest driver for VirtIO-FS or 9p. `SHARE_BACKEND=auto` therefore selects QEMU user-mode SMB. That backend needs `NETWORK_TYPE=user` or `nat` and host `smbd`, and QEMU slirp SMB is SMB 1.0 — modern macOS often refuses it. Prefer TAP + a host Samba/NFS share, or copy files over SSH after the guest agent is installed. |
+| Shared folders | Partial | There is no supported macOS guest driver for VirtIO-FS or 9p. macOS always uses QEMU user-mode SMB (the first share only), even when `SHARE_BACKEND` names another backend. That path needs `NETWORK_TYPE=user` or `nat` and host `smbd`, and QEMU slirp SMB is SMB 1.0 — modern macOS often refuses it. Prefer TAP + a host Samba/NFS share, or copy files over SSH after the guest agent is installed. |
 | Software audio | Yes | `ich9-intel-hda` + `hda-duplex` is always attached on the macOS path. |
 | PCIe audio passthrough (VFIO) | No | Skipped so the OSX-KVM HDA device stays the audio path. |
 | SPICE | No | Display is `vmware-svga` + the default GTK/SDL window (or `--headless`). |
@@ -777,7 +781,7 @@ ss -tuln | grep :PORT
 Privileged ports (≤1024) may require root privileges.
 
 ### Security Violations
-If a configuration file is owned by another user or has insecure global write permissions, qemate will abort or automatically harden the permissions to `600`.
+A configuration file owned by another user is refused. Any mode other than `600` is rewritten to `600`.
 
 ### Errors
 Use `qemate logs <n>` (or inspect the files under the VM log directory):
@@ -791,7 +795,7 @@ Use `qemate logs <n>` (or inspect the files under the VM log directory):
 Contributions are welcome. Key guidelines:
 - Follow the Google Shell Style Guide.
 - Use 4-space indentation.
-- Update `README.md`, `CHANGELOG.md`, and `VERSION` for changes.
+- Update `README.md`, `CHANGELOG.md`, the version in `src/qemate.sh`, `PKGBUILD`, and the man page for changes.
 - Submit pull requests with clear descriptions.
 
 ## License

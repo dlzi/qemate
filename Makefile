@@ -5,8 +5,8 @@ BINDIR ?= $(PREFIX)/bin
 DOCDIR ?= $(PREFIX)/share/doc/qemate
 MANDIR ?= $(PREFIX)/share/man/man1
 
-SCRIPT_SRC := $(if $(wildcard src/qemate.sh),src/qemate.sh,qemate.sh)
-MAN_SRC := $(if $(wildcard docs/man/qemate.1),docs/man/qemate.1,qemate.1)
+SCRIPT_SRC := src/qemate.sh
+MAN_SRC := docs/man/qemate.1
 DOCS := $(wildcard README.md CHANGELOG.md LICENSE)
 
 # No build step needed for Bash scripts
@@ -21,7 +21,8 @@ install:
 	@install -d $(DESTDIR)$(MANDIR)
 	@install -m 755 $(SCRIPT_SRC) $(DESTDIR)$(BINDIR)/qemate
 	@for doc in $(DOCS); do install -m 644 $$doc $(DESTDIR)$(DOCDIR)/; done
-	@if [ -f $(MAN_SRC) ]; then install -m 644 $(MAN_SRC) $(DESTDIR)$(MANDIR)/qemate.1; else echo "Warning: man page not found; skipping."; fi
+	@test -f $(MAN_SRC) || { echo "docs/man/qemate.1 not found"; exit 1; }
+	@install -m 644 $(MAN_SRC) $(DESTDIR)$(MANDIR)/qemate.1
 	@echo "Installation complete!"
 
 uninstall:
@@ -33,8 +34,7 @@ uninstall:
 
 clean:
 	@echo "Cleaning up build artifacts..."
-	@rm -f *~ *.bak *.log *.tar.gz
-	@rm -rf dist build __pycache__
+	@rm -f *~ *.bak
 	@echo "Clean complete!"
 
 # For makepkg/pacman package building cleanup
@@ -45,8 +45,6 @@ pkgclean:
 	@echo "Package clean complete!"
 
 distclean: clean pkgclean
-	@echo "Performing deep clean..."
-	@rm -rf .venv .cache
 	@echo "Deep clean complete!"
 
 .PHONY: all install uninstall clean pkgclean distclean

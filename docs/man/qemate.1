@@ -1,4 +1,4 @@
-.TH QEMATE 1 "October 10, 2026" "qemate 6.0.0" "User Commands"
+.TH QEMATE 1 "October 12, 2026" "qemate 6.0.1" "User Commands"
 .SH NAME
 qemate \- Hardened QEMU virtual machine manager for Linux
 .SH SYNOPSIS
@@ -67,7 +67,7 @@ Start a VM. Log rotation runs automatically on each start.
 .RS
 .TP
 .B --headless
-Start without a graphical console.
+Start without a GTK/SDL console. On Linux and Windows, SPICE still listens when \fBSPICE_ENABLED=1\fR. macOS does not attach SPICE.
 .TP
 .B --detach
 Return after QEMU is ready and keep a detached qemate supervisor responsible for lifecycle cleanup. Independent of \fB--headless\fR, except when neither \fBDISPLAY\fR nor \fBWAYLAND_DISPLAY\fR is set: detached start then implies \fB--headless\fR so QEMU does not fail opening a GUI. The process cannot later be returned to the original shell with \fBfg\fR; use qemate status/stop and reconnect through a configured display service when needed. PCIe audio passthrough in this mode requires passwordless sudo (no TTY for interactive \fBsudo\fR).
@@ -84,6 +84,8 @@ Print the full generated QEMU command to stderr before a foreground launch. For 
 .B --dry-run
 Print the shell-escaped effective QEMU command without binding host devices, creating TAP interfaces, or starting helper daemons. With \fB--detach\fR, also report the requested launch mode without spawning a supervisor.
 .RE
+.PP
+Linux and Windows guests get a VirtIO serial guest-agent socket at \fBsockets/qga.sock\fR when \fBENABLE_GUEST_AGENT=1\fR (the default). Set the key to \fB0\fR to omit the device. macOS uses \fBMACOS_GUEST_AGENT\fR and an ISA serial socket instead.
 
 .TP
 .B stop NAME [--timeout SECONDS] [--force]
@@ -115,23 +117,23 @@ creates a \fBlinked\fR clone (default): a new qcow2 whose backing file is the so
 with \fB--full\fR: a standalone full copy of the disk.
 .RE
 .IP
-UEFI NVRAM and TPM state are copied when present. VMs that use a host block device (\fBDISK_DEV\fR / \fB--disk-dev\fR) cannot be cloned: there is no private image file to duplicate, and pointing two VMs at the same physical disk is unsafe. Create a second VM with its own \fB--disk-dev\fR path instead.
+UEFI NVRAM and TPM state are copied when present. macOS recovery media is not copied, and \fBMACOS_INSTALL_MEDIA\fR is cleared on the clone. Permanent OpenCore assets under \fBmacos/assets\fR are copied when that directory exists. VMs that use a host block device (\fBDISK_DEV\fR / \fB--disk-dev\fR) cannot be cloned: there is no private image file to duplicate, and pointing two VMs at the same physical disk is unsafe. Create a second VM with its own \fB--disk-dev\fR path instead.
 
 .TP
 .B delete NAME [--force]
 Delete a VM and all its data. Prompts for confirmation unless \fB--force\fR is used. Locked VMs require \fB--force\fR.
 
 .TP
-.B resize NAME SIZE|+SIZE [--force]
-Resize the VM disk image (e.g., \fB80G\fR or \fB+20G\fR). The VM must be stopped. \fB--force\fR is accepted for CLI compatibility but does not allow live qcow2 resizing. Not supported for physical-device VMs (\fB--disk-dev\fR). The config records exact GiB when the size is divisible by 1\ GiB; otherwise MiB.
+.B resize NAME [--force] SIZE|+SIZE
+Resize the VM disk image (e.g., \fB80G\fR or \fB+20G\fR). The VM must be stopped. \fB--force\fR may appear before or after the size. It is accepted for CLI compatibility and does not resize a running disk. Not supported for physical-device VMs (\fB--disk-dev\fR). The config records exact GiB when the size is divisible by 1\ GiB; otherwise MiB.
 
 .TP
 .B list
-List all VMs with seven columns: NAME, STATUS, LOCKED, OS, AUDIO, TPM, SPICE. Uses a lightweight config read (no full validation lock per row).
+List all VMs with seven columns: NAME, STATUS, LOCKED, OS, AUDIO, TPM, SPICE. STATUS is \fBrunning\fR, \fBstopped\fR, or \fBbusy\fR (the lifecycle lock is held, for example during a macOS recovery download). AUDIO, TPM, and SPICE on macOS rows show the devices the OpenCore path attaches (audio on, TPM off, SPICE off). Uses a lightweight config read (no full validation lock per row).
 
 .TP
 .B status NAME
-Display detailed VM configuration and runtime status, including CPU, memory, disk, network, UEFI state, share backend, port forwards, USB passthrough, and shared folders.
+Display detailed VM configuration and runtime status, including CPU, memory, disk, network, audio, TPM, SPICE, guest agent, UEFI state, share backend, port forwards, USB passthrough, and shared folders. For macOS, CPU, disk interface, and video are the OpenCore devices, with a note when the stored keys differ.
 
 .TP
 .B configure NAME
@@ -247,6 +249,9 @@ Unlock a VM.
 .B user
 SLiRP userspace NAT. Default; no host setup required.
 .TP
+.B nat
+Alias of \fBuser\fR. Same SLiRP userspace NAT.
+.TP
 .B passt
 Unprivileged backend using the host network stack directly (requires \fBpasst\fR).
 .TP
@@ -259,7 +264,7 @@ No network interface attached to the VM.
 .SH SHARED FOLDER BACKENDS
 .TP
 .B auto
-Picks the best available backend: virtiofs \(-> virtfs for Linux guests, smb for Windows and macOS guests.
+Picks the best available backend: virtiofs \(-> virtfs for Linux guests, smb for Windows guests. macOS always uses SMB, including when another backend is configured.
 .TP
 .B virtfs
 9P filesystem. Linux guests only; no extra host dependencies.

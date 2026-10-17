@@ -2,7 +2,7 @@
 # =============================================================================
 # qemate — Streamlined QEMU Virtual Machine Management Utility
 #
-# VERSION:  6.0.0
+# VERSION:  6.0.1
 # LICENSE:  MIT
 # =============================================================================
 
@@ -21,7 +21,7 @@ umask 0077
 # CONSTANTS & DEFAULTS
 # =============================================================================
 
-readonly VERSION="6.0.0"
+readonly VERSION="6.0.1"
 readonly MIN_QEMU_MAJOR=11
 readonly MIN_QEMU_VERSION="11.0"
 readonly DEFAULT_MACHINE_TYPE="pc-q35-11.0"
@@ -44,7 +44,8 @@ declare -A _BASE_DEFAULTS=(
     [NETWORK_MODEL]=virtio-net-pci
     [DISK_INTERFACE]=virtio
     [ENABLE_AUDIO]=0
-    [AUDIO_PASSTHROUGH_PCI]=0
+    [AUDIO_PASSTHROUGH_PCI]=""
+    [ENABLE_GUEST_AGENT]=1
     [CPU_TYPE]=host
     [MACHINE_TYPE]="$DEFAULT_MACHINE_TYPE"
     [VIDEO_TYPE]="qxl-vga"
@@ -83,7 +84,8 @@ declare -A _OS_OVERRIDES_macos=(
     [ENABLE_VIRTIO]=1
     [MACOS_GUEST_AGENT]=1
 )
-# Windows: NVMe disk, larger defaults, UEFI on, Hyper-V enlightenments via SMB shares.
+# Windows: NVMe disk, larger defaults, UEFI and TPM on.
+# Hyper-V enlightenments are applied when the VM starts.
 declare -A _OS_OVERRIDES_windows=(
     [CORES]=4
     [MEMORY]="4G"
@@ -365,6 +367,16 @@ release_flock() {
     exec {_rf_fd}>&-
 }
 
+# Release a lock acquired with acquire_flock / acquire_stopped_vm_lock.
+# fd_name is the variable that holds the descriptor. No-op when it is empty.
+# Release before log_message ERROR: that call returns 1, and set -e would
+# otherwise leave the descriptor open until the process exits.
+release_named_lock() {
+    local fd_name="$1"
+    [[ -n "${!fd_name:-}" ]] || return 0
+    release_flock "$fd_name" "${2:-}"
+}
+
 # split_list RAW_CSV OUTPUT_ARRAY_NAMEREF — splits a comma-separated string.
 split_list() {
     local raw="$1"
@@ -455,6 +467,18 @@ size_to_bytes() {
     [[ "$value" =~ ^[0-9]+$ ]] || return 1
     if [[ "${unit^^}" == "G" ]]; then printf '%s' "$(( value * 1024 * 1024 * 1024 ))"
     else printf '%s' "$(( value * 1024 * 1024 ))"
+    fi
+}
+
+# Record a byte count as whole GiB when it divides evenly, otherwise as MiB
+# rounded up. A sub-GiB disk must not be stored as 0G.
+bytes_to_disk_size() {
+    local bytes="$1"
+    [[ "$bytes" =~ ^[0-9]+$ && "$bytes" -gt 0 ]] || return 1
+    if (( bytes % 1073741824 == 0 )); then
+        printf '%sG' "$(( bytes / 1073741824 ))"
+    else
+        printf '%sM' "$(( (bytes + 1048575) / 1048576 ))"
     fi
 }
 
@@ -637,7 +661,7 @@ readonly -a CONFIG_KEYS=(
     ENABLE_VIRTIO MEMORY_PREALLOC MEMORY_SHARE
     ENABLE_AUDIO AUDIO_PASSTHROUGH_PCI
     USB_DEVICES SHARED_FOLDERS SHARE_BACKEND
-    ENABLE_TPM SPICE_ENABLED SPICE_PORT ENABLE_UEFI
+    ENABLE_TPM SPICE_ENABLED SPICE_PORT ENABLE_UEFI ENABLE_GUEST_AGENT
     PERFORMANCE_PROFILE HIDE_KVM CPU_AFFINITY
     MACOS_VERSION MACOS_INSTALL_MEDIA MACOS_GUEST_AGENT
     LOCKED
@@ -739,7 +763,7 @@ validate_vm_config_values() {
             log_message "ERROR" "Invalid DISK_SIZE: '${_vcv_vm[DISK_SIZE]:-}'" "$vm_name"; return 1; }
     fi
 
-    for key in ENABLE_VIRTIO MEMORY_PREALLOC MEMORY_SHARE ENABLE_AUDIO ENABLE_TPM SPICE_ENABLED ENABLE_UEFI HIDE_KVM LOCKED; do
+    for key in ENABLE_VIRTIO MEMORY_PREALLOC MEMORY_SHARE ENABLE_AUDIO ENABLE_TPM SPICE_ENABLED ENABLE_UEFI ENABLE_GUEST_AGENT HIDE_KVM LOCKED; do
         value="${_vcv_vm[$key]:-}"
         [[ "$value" =~ ^[01]$ ]] || {
             log_message "ERROR" "Invalid $key: '$value' (must be 0 or 1)" "$vm_name"; return 1; }
@@ -892,6 +916,7 @@ load_vm_config() {
     _lvc_vm[MACOS_VERSION]="${_lvc_vm[MACOS_VERSION]:-}"
     _lvc_vm[HIDE_KVM]="${_lvc_vm[HIDE_KVM]:-0}"
     _lvc_vm[CPU_AFFINITY]="${_lvc_vm[CPU_AFFINITY]:-}"
+    _lvc_vm[ENABLE_GUEST_AGENT]="${_lvc_vm[ENABLE_GUEST_AGENT]:-1}"
     [[ "${_lvc_vm[OS_TYPE]:-linux}" == "macos" ]] &&         _lvc_vm[MACOS_GUEST_AGENT]="${_lvc_vm[MACOS_GUEST_AGENT]:-1}"
 
     validate_vm_config_values "$vm_name" _lvc_vm || {
@@ -1081,7 +1106,15 @@ valid_port() {
 
 host_port_in_use() {
     local host_port="$1" proto="$2" _st _rq _sq local_addr _peer local_port
-    command -v ss >/dev/null 2>&1 || return 1
+    if ! command -v ss >/dev/null 2>&1; then
+        # A missing ss cannot prove the port is free. Warn once per process
+        # instead of treating every check as a silent pass.
+        if [[ "${_WARNED_NO_SS:-0}" != "1" ]]; then
+            _WARNED_NO_SS=1
+            log_message "WARNING" "ss (iproute2) is not installed; host port checks are skipped."
+        fi
+        return 1
+    fi
     [[ "$host_port" =~ ^[0-9]+$ ]] || return 1
 
     # Compare against the port of ss column 4 (Local Address:Port) only.
@@ -1127,9 +1160,16 @@ manage_network_ports() {
     acquire_stopped_vm_lock "$vm_name" operation_fd || return 1
 
     local -A VM=()
-    load_vm_config "$vm_name" VM || return 1
+    if ! load_vm_config "$vm_name" VM; then
+        release_named_lock operation_fd
+        return 1
+    fi
 
-    local normalized; parse_port_spec "$port_spec" "$vm_name" normalized || return 1
+    local normalized
+    if ! parse_port_spec "$port_spec" "$vm_name" normalized; then
+        release_named_lock operation_fd
+        return 1
+    fi
     local port_array=(); split_list "${VM[PORT_FORWARDS]:-}" port_array
     local new_array=() found=0 p
 
@@ -1137,15 +1177,18 @@ manage_network_ports() {
         add)
             for p in "${port_array[@]}"; do
                 [[ "$p" == "$normalized" ]] && {
-                    log_message "WARNING" "Port rule already exists: $normalized" "$vm_name"; return 0; }
+                    log_message "WARNING" "Port rule already exists: $normalized" "$vm_name"
+                    release_named_lock operation_fd
+                    return 0
+                }
                 new_array+=("$p")
             done
             # Validate host port is free now so the error is not deferred until start.
             if [[ "$normalized" =~ ^(([0-9\.]+):)?([0-9]+):([0-9]+):(tcp|udp)$ ]]; then
                 local check_hport="${BASH_REMATCH[3]}" check_proto="${BASH_REMATCH[5]}"
                 if host_port_in_use "$check_hport" "$check_proto"; then
+                    release_named_lock operation_fd
                     log_message "ERROR" "Host port already in use: ${check_hport}/${check_proto}" "$vm_name"
-                    release_flock operation_fd "$VM_DIR/$vm_name/qemu.pid.lock"
                     return 1
                 fi
             fi
@@ -1156,13 +1199,19 @@ manage_network_ports() {
                 [[ "$p" != "$normalized" ]] && new_array+=("$p") || found=1
             done
             [[ $found -eq 0 ]] && {
-                log_message "WARNING" "Port rule not found: $normalized" "$vm_name"; return 1; }
+                log_message "WARNING" "Port rule not found: $normalized" "$vm_name"
+                release_named_lock operation_fd
+                return 1
+            }
             log_message "INFO" "Removed port forwarding: $normalized" "$vm_name" ;;
     esac
 
     VM[PORT_FORWARDS]=$(IFS=,; echo "${new_array[*]:-}")
-    save_vm_config "$vm_name" VM
-    release_flock operation_fd "$VM_DIR/$vm_name/qemu.pid.lock"
+    if ! save_vm_config "$vm_name" VM; then
+        release_named_lock operation_fd
+        return 1
+    fi
+    release_named_lock operation_fd
 }
 
 # =============================================================================
@@ -1301,7 +1350,10 @@ manage_usb() {
     fi
 
     local -A VM=()
-    load_vm_config "$vm_name" VM || return 1
+    if ! load_vm_config "$vm_name" VM; then
+        release_named_lock operation_fd
+        return 1
+    fi
     local usb_array=(); split_list "${VM[USB_DEVICES]:-}" usb_array
 
     case "$action" in
@@ -1318,29 +1370,44 @@ manage_usb() {
             fi
             return 0 ;;
         add)
-            parse_usb_id "$usb_id" || return 1
+            if ! parse_usb_id "$usb_id"; then
+                release_named_lock operation_fd
+                return 1
+            fi
             local u
             for u in "${usb_array[@]}"; do
                 [[ "$u" == "$usb_id" ]] && {
-                    log_message "WARNING" "USB device already added: $usb_id" "$vm_name"; return 0; }
+                    log_message "WARNING" "USB device already added: $usb_id" "$vm_name"
+                    release_named_lock operation_fd
+                    return 0
+                }
             done
             usb_array+=("$usb_id")
             log_message "INFO" "USB device added: $usb_id" "$vm_name" ;;
         remove)
-            parse_usb_id "$usb_id" || return 1
+            if ! parse_usb_id "$usb_id"; then
+                release_named_lock operation_fd
+                return 1
+            fi
             local new_array=() found=0 u
             for u in "${usb_array[@]}"; do
                 [[ "$u" != "$usb_id" ]] && new_array+=("$u") || found=1
             done
-            [[ $found -eq 0 ]] && {
-                log_message "ERROR" "USB device not found: $usb_id" "$vm_name"; return 1; }
+            if [[ $found -eq 0 ]]; then
+                release_named_lock operation_fd
+                log_message "ERROR" "USB device not found: $usb_id" "$vm_name"
+                return 1
+            fi
             usb_array=("${new_array[@]:-}")
             log_message "INFO" "USB device removed: $usb_id" "$vm_name" ;;
     esac
 
     VM[USB_DEVICES]=$(IFS=,; echo "${usb_array[*]:-}")
-    save_vm_config "$vm_name" VM
-    [[ -z "$operation_fd" ]] || release_flock operation_fd "$VM_DIR/$vm_name/qemu.pid.lock"
+    if ! save_vm_config "$vm_name" VM; then
+        release_named_lock operation_fd
+        return 1
+    fi
+    release_named_lock operation_fd
 }
 
 # =============================================================================
@@ -1376,14 +1443,25 @@ resolve_share_backend() {
     split_list "${_rsb_vm[SHARED_FOLDERS]:-}" shares
     local share_count="${#shares[@]}"
 
-    [[ "$share_count" -eq 0 ]] && { echo "none"; return; }
+    [[ "$share_count" -eq 0 ]] && { echo "none"; return 0; }
+
+    # macOS has no supported 9p/virtiofs guest driver. Always use SMB, including
+    # when the config names another backend or lists more than one folder.
+    # Callers that start the VM warn about a non-SMB backend; this function
+    # stays quiet so status does not repeat that warning.
+    if [[ "${_rsb_vm[OS_TYPE]:-linux}" == "macos" ]]; then
+        echo "smb"
+        return 0
+    fi
 
     if [[ "$backend" != "auto" ]]; then
         if [[ "$backend" == "smb" && "$share_count" -gt 1 ]]; then
             log_message "WARNING" "SMB does not support multiple shares. Falling back to virtiofs." "${_rsb_vm[NAME]:-unknown}"
-            echo "virtiofs"; return
+            echo "virtiofs"
+            return 0
         fi
-        echo "$backend"; return
+        echo "$backend"
+        return 0
     fi
 
     if [[ "$share_count" -gt 1 ]]; then
@@ -1451,7 +1529,10 @@ manage_shares() {
     fi
 
     local -A VM=()
-    load_vm_config "$vm_name" VM || return 1
+    if ! load_vm_config "$vm_name" VM; then
+        release_named_lock operation_fd
+        return 1
+    fi
     local share_array=(); split_list "${VM[SHARED_FOLDERS]:-}" share_array
 
     case "$action" in
@@ -1467,13 +1548,25 @@ manage_shares() {
             fi
             return 0 ;;
         add)
-            local resolved; resolved=$(parse_share_spec "$spec") || return 1
+            local resolved
+            if ! resolved=$(parse_share_spec "$spec"); then
+                release_named_lock operation_fd
+                return 1
+            fi
             local new_tag="${resolved%%:*}" new_path
             new_path=$(realpath -m "${resolved#*:}")
-            [[ ! -d "$new_path" ]] && { log_message "ERROR" "Host path does not exist: $new_path"; return 1; }
+            if [[ ! -d "$new_path" ]]; then
+                release_named_lock operation_fd
+                log_message "ERROR" "Host path does not exist: $new_path"
+                return 1
+            fi
             local s
             for s in "${share_array[@]:-}"; do
-                [[ "${s%%:*}" == "$new_tag" ]] && { log_message "ERROR" "Share tag '$new_tag' already exists."; return 1; }
+                if [[ "${s%%:*}" == "$new_tag" ]]; then
+                    release_named_lock operation_fd
+                    log_message "ERROR" "Share tag '$new_tag' already exists."
+                    return 1
+                fi
             done
             share_array+=("${new_tag}:${new_path}")
             log_message "INFO" "Share added: $new_tag → $new_path" "$vm_name" ;;
@@ -1482,14 +1575,21 @@ manage_shares() {
             for s in "${share_array[@]:-}"; do
                 [[ "${s%%:*}" != "$spec" ]] && new_array+=("$s") || found=1
             done
-            [[ $found -eq 0 ]] && { log_message "ERROR" "Share tag not found: $spec" "$vm_name"; return 1; }
+            if [[ $found -eq 0 ]]; then
+                release_named_lock operation_fd
+                log_message "ERROR" "Share tag not found: $spec" "$vm_name"
+                return 1
+            fi
             share_array=("${new_array[@]:-}")
             log_message "INFO" "Share removed: $spec" "$vm_name" ;;
     esac
 
     VM[SHARED_FOLDERS]=$(IFS=,; echo "${share_array[*]:-}")
-    save_vm_config "$vm_name" VM
-    [[ -z "$operation_fd" ]] || release_flock operation_fd "$VM_DIR/$vm_name/qemu.pid.lock"
+    if ! save_vm_config "$vm_name" VM; then
+        release_named_lock operation_fd
+        return 1
+    fi
+    release_named_lock operation_fd
 }
 
 start_virtiofsd_daemons() {
@@ -1745,6 +1845,21 @@ macos_ensure_shared_cache() {
         log_message "ERROR" "Shared OSX-KVM cache is incomplete: $OSX_KVM_CACHE_DIR"; return 1; }
 }
 
+# Drop a per-VM OSX-KVM checkout and unregister it from the shared cache.
+# rm -rf of a linked worktree leaves it registered, and the next worktree add
+# then fails with "missing but already registered". A missing path is a no-op.
+remove_osx_kvm_checkout() {
+    local repo="$1"
+    [[ -e "$repo" ]] || return 0
+    if [[ -f "$repo/.git" && ! -d "$repo/.git" && -d "$OSX_KVM_CACHE_DIR/.git" ]]; then
+        git -C "$OSX_KVM_CACHE_DIR" worktree remove --force "$repo" >/dev/null 2>&1 || true
+    fi
+    rm -rf "$repo"
+    if [[ -d "$OSX_KVM_CACHE_DIR/.git" ]]; then
+        git -C "$OSX_KVM_CACHE_DIR" worktree prune >/dev/null 2>&1 || true
+    fi
+}
+
 macos_prepare_repo() {
     local vm_name="$1"
     local macos_dir="$VM_DIR/$vm_name/macos"
@@ -1755,13 +1870,16 @@ macos_prepare_repo() {
 
     # Prefer a local worktree (or lightweight local clone) linked to the shared cache
     # so multiple macOS VMs do not each download the full repository.
+    # A worktree's .git is a file; a clone's .git is a directory with HEAD inside it.
     if [[ ! -f "$macos_dir/OSX-KVM/.git/HEAD" && ! -f "$macos_dir/OSX-KVM/.git" ]]; then
         log_message "INFO" "Creating per-VM OSX-KVM worktree from shared cache..." "$vm_name"
         rm -rf "$macos_dir/OSX-KVM"
-        if git -C "$OSX_KVM_CACHE_DIR" worktree add --detach "$macos_dir/OSX-KVM" HEAD 2>/dev/null; then
-            :
-        else
-            # Fallback for older git: local clone reuses objects via hardlinks when possible.
+        if [[ -d "$OSX_KVM_CACHE_DIR/.git" ]]; then
+            git -C "$OSX_KVM_CACHE_DIR" worktree prune >/dev/null 2>&1 || true
+        fi
+        if ! git -C "$OSX_KVM_CACHE_DIR" worktree add --detach "$macos_dir/OSX-KVM" HEAD; then
+            log_message "WARNING" "git worktree add failed; falling back to a local clone of the shared cache." "$vm_name"
+            rm -rf "$macos_dir/OSX-KVM"
             git clone --local --shared --depth 1 "$OSX_KVM_CACHE_DIR" "$macos_dir/OSX-KVM" || {
                 log_message "ERROR" "Failed to create per-VM OSX-KVM checkout from shared cache" "$vm_name"
                 return 1
@@ -1776,7 +1894,8 @@ macos_prepare_repo() {
 macos_repo_info() {
     local vm_name="$1"
     local repo="$VM_DIR/$vm_name/macos/OSX-KVM"
-    [[ -d "$repo/.git" ]] || return 1
+    # Worktrees keep a .git file (gitdir: ...), not a .git directory.
+    [[ -e "$repo/.git" ]] || return 1
     local commit remote
     commit=$(git -C "$repo" rev-parse --short HEAD 2>/dev/null || true)
     remote=$(git -C "$repo" remote get-url origin 2>/dev/null || true)
@@ -1792,36 +1911,54 @@ macos_refresh_repo() {
 
     # Always refresh the shared cache first so all VMs benefit.
     if [[ -d "$OSX_KVM_CACHE_DIR/.git" ]]; then
-        git -C "$OSX_KVM_CACHE_DIR" fetch --depth 1 --prune origin master &&             git -C "$OSX_KVM_CACHE_DIR" reset --hard FETCH_HEAD || {
+        git -C "$OSX_KVM_CACHE_DIR" fetch --depth 1 --prune origin master && \
+            git -C "$OSX_KVM_CACHE_DIR" reset --hard FETCH_HEAD || {
             log_message "WARNING" "Failed to update shared OSX-KVM cache; continuing with local checkout" "$vm_name"
         }
     else
-        macos_ensure_shared_cache || {
-            release_flock fd "$VM_DIR/$vm_name/qemu.pid.lock"; return 1; }
+        if ! macos_ensure_shared_cache; then
+            release_named_lock fd
+            return 1
+        fi
     fi
 
     local repo="$VM_DIR/$vm_name/macos/OSX-KVM"
-    if [[ ! -e "$repo/.git" && ! -d "$repo/.git" ]]; then
-        release_flock fd "$VM_DIR/$vm_name/qemu.pid.lock"
+    if [[ ! -e "$repo/.git" ]]; then
+        release_named_lock fd
         macos_prepare_repo "$vm_name"
         return $?
     fi
-    # For worktrees, reset to the shared cache HEAD; for local clones, fetch from origin/cache.
-    if git -C "$repo" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-        git -C "$repo" fetch --depth 1 "$OSX_KVM_CACHE_DIR" HEAD 2>/dev/null || true
-        git -C "$repo" reset --hard FETCH_HEAD 2>/dev/null ||             git -C "$repo" reset --hard "$(git -C "$OSX_KVM_CACHE_DIR" rev-parse HEAD)" || {
+
+    local cache_head
+    cache_head=$(git -C "$OSX_KVM_CACHE_DIR" rev-parse HEAD) || {
+        release_named_lock fd
+        log_message "ERROR" "Failed to read shared OSX-KVM cache" "$vm_name"
+        return 1
+    }
+    # rev-parse --is-inside-work-tree is true for both a linked worktree and a
+    # clone. A worktree's .git is a file; a clone's .git is a directory.
+    if [[ -f "$repo/.git" && ! -d "$repo/.git" ]]; then
+        git -C "$repo" reset --hard "$cache_head" || {
+            release_named_lock fd
             log_message "ERROR" "Failed to update local OSX-KVM checkout" "$vm_name"
-            release_flock fd "$VM_DIR/$vm_name/qemu.pid.lock"; return 1; }
+            return 1
+        }
     else
-        git -C "$repo" fetch --depth 1 --prune origin master || {
-            log_message "ERROR" "Failed to update OSX-KVM repository" "$vm_name"
-            release_flock fd "$VM_DIR/$vm_name/qemu.pid.lock"; return 1; }
+        if ! git -C "$repo" fetch --depth 1 "$OSX_KVM_CACHE_DIR" HEAD; then
+            git -C "$repo" fetch --depth 1 --prune origin master || {
+                release_named_lock fd
+                log_message "ERROR" "Failed to update OSX-KVM repository" "$vm_name"
+                return 1
+            }
+        fi
         git -C "$repo" reset --hard FETCH_HEAD || {
+            release_named_lock fd
             log_message "ERROR" "Failed to update local OSX-KVM checkout" "$vm_name"
-            release_flock fd "$VM_DIR/$vm_name/qemu.pid.lock"; return 1; }
+            return 1
+        }
     fi
     log_message "INFO" "OSX-KVM assets updated to $(git -C "$repo" rev-parse --short HEAD)." "$vm_name"
-    release_flock fd "$VM_DIR/$vm_name/qemu.pid.lock"
+    release_named_lock fd
 }
 
 # Return the OpenCore image used for a VM without creating or modifying files.
@@ -2376,8 +2513,6 @@ macos_vmhide() {
                 release_flock fd "$VM_DIR/$vm_name/qemu.pid.lock"
                 return 1
             fi
-            printf 'VMHIDE_VERSION=%q\nLILU_VERSION=%q\n' "$vmhide_version" "$lilu_version" > "$VM_DIR/$vm_name/macos/vmhide.env"
-            chmod 600 "$VM_DIR/$vm_name/macos/vmhide.env"
             rm -rf "$workspace"
             release_flock fd "$VM_DIR/$vm_name/qemu.pid.lock"
             log_message "INFO" "VMHide ${vmhide_version} and Lilu ${lilu_version} installed. Restart the VM to load them." "$vm_name"
@@ -2536,8 +2671,9 @@ install_macos() {
         log_message "INFO" "Downloading macOS $version recovery image from Apple via OSX-KVM..." "$vm_name"
         rm -f "$repo"/BaseSystem.dmg "$repo"/BaseSystem.img "$repo"/*.chunklist
         if ! (macos_download_recovery "$repo" "$version" && [[ -f "$repo/BaseSystem.dmg" ]] && dmg2img -i "$repo/BaseSystem.dmg" "$repo/BaseSystem.img"); then
-            log_message "ERROR" "Failed to download or convert the macOS recovery image" "$vm_name"
-            release_flock fd "$VM_DIR/$vm_name/qemu.pid.lock"; return 1
+            release_flock fd "$VM_DIR/$vm_name/qemu.pid.lock"
+            log_message "ERROR" "Failed to download or convert the macOS recovery image" "$vm_name" || true
+            return 1
         fi
         chmod 600 "$repo/BaseSystem.img" 2>/dev/null || true
     fi
@@ -2617,8 +2753,8 @@ macos_finalize_install() {
         return 1
     fi
 
-    if [[ -d "$repo" ]]; then
-        rm -rf "$repo"
+    if [[ -e "$repo" ]]; then
+        remove_osx_kvm_checkout "$repo"
         log_message "INFO" "Removed temporary OSX-KVM checkout and recovery download artifacts." "$vm_name"
     fi
     rm -f "$macos_dir"/BaseSystem.img "$macos_dir"/BaseSystem.dmg "$macos_dir"/*.chunklist 2>/dev/null || true
@@ -2691,24 +2827,32 @@ macos_doctor() {
     elif [[ -f "$repo/OpenCore/OpenCore.qcow2" ]]; then
         log_message "INFO" "OK: OSX-KVM/OpenCore/OpenCore.qcow2" "$vm_name"
     else
-        log_message "ERROR" "Missing: OpenCore.qcow2" "$vm_name"; failures=1
+        # ERROR returns 1. || true keeps set -e from skipping the rest of the report.
+        log_message "ERROR" "Missing: OpenCore.qcow2" "$vm_name" || true
+        failures=1
     fi
     if [[ -f "$assets/OVMF_CODE_4M.fd" ]]; then
         log_message "INFO" "OK: assets/OVMF_CODE_4M.fd" "$vm_name"
     elif [[ -f "$repo/OVMF_CODE_4M.fd" ]]; then
         log_message "INFO" "OK: OSX-KVM/OVMF_CODE_4M.fd" "$vm_name"
     else
-        log_message "ERROR" "Missing: OVMF_CODE_4M.fd" "$vm_name"; failures=1
+        log_message "ERROR" "Missing: OVMF_CODE_4M.fd" "$vm_name" || true
+        failures=1
     fi
     if [[ -f "$assets/OVMF_VARS-1920x1080.fd" ]]; then
         log_message "INFO" "OK: assets/OVMF_VARS-1920x1080.fd" "$vm_name"
     elif [[ -f "$repo/OVMF_VARS-1920x1080.fd" ]]; then
         log_message "INFO" "OK: OSX-KVM/OVMF_VARS-1920x1080.fd" "$vm_name"
     else
-        log_message "ERROR" "Missing: OVMF_VARS-1920x1080.fd" "$vm_name"; failures=1
+        log_message "ERROR" "Missing: OVMF_VARS-1920x1080.fd" "$vm_name" || true
+        failures=1
     fi
-    if [[ -d "$repo/.git" ]]; then
-        [[ -f "$repo/fetch-macOS-v2.py" ]] && log_message "INFO" "OK: fetch-macOS-v2.py (checkout present)" "$vm_name" || log_message "WARNING" "Missing: fetch-macOS-v2.py" "$vm_name"
+    if [[ -e "$repo/.git" ]]; then
+        if [[ -f "$repo/fetch-macOS-v2.py" ]]; then
+            log_message "INFO" "OK: fetch-macOS-v2.py (checkout present)" "$vm_name"
+        else
+            log_message "WARNING" "Missing: fetch-macOS-v2.py" "$vm_name"
+        fi
     else
         log_message "INFO" "OSX-KVM checkout removed after install (recovery media cleaned up)." "$vm_name"
     fi
@@ -2717,11 +2861,11 @@ macos_doctor() {
         if [[ "$v" == "Y" || "$v" == "1" ]]; then
             log_message "INFO" "OK: KVM ignore_msrs=$v" "$vm_name"
         else
-            log_message "ERROR" "KVM ignore_msrs=$v. If kvm is already loaded, 'sudo modprobe kvm ignore_msrs=1' may be a no-op. Use: sudo sh -c 'echo 1 > /sys/module/kvm/parameters/ignore_msrs' (or unload/reload KVM with ignore_msrs=1)." "$vm_name"
+            log_message "ERROR" "KVM ignore_msrs=$v. If kvm is already loaded, 'sudo modprobe kvm ignore_msrs=1' may be a no-op. Use: sudo sh -c 'echo 1 > /sys/module/kvm/parameters/ignore_msrs' (or unload/reload KVM with ignore_msrs=1)." "$vm_name" || true
             failures=1
         fi
     else
-        log_message "ERROR" "Cannot inspect KVM ignore_msrs on this host; macOS requires ignore_msrs=1 per OSX-KVM." "$vm_name"
+        log_message "ERROR" "Cannot inspect KVM ignore_msrs on this host; macOS requires ignore_msrs=1 per OSX-KVM." "$vm_name" || true
         failures=1
     fi
     if command -v lscpu >/dev/null 2>&1; then
@@ -2731,9 +2875,18 @@ macos_doctor() {
         done
     fi
     local qdevs; qdevs=$(qemu-system-x86_64 -device help 2>/dev/null || true)
-    [[ "$qdevs" == *"isa-applesmc"* ]] || { log_message "ERROR" "QEMU lacks isa-applesmc device support." "$vm_name"; failures=1; }
-    [[ "$qdevs" == *"vmware-svga"* ]] || { log_message "ERROR" "QEMU lacks vmware-svga device support." "$vm_name"; failures=1; }
-    [[ "$qdevs" == *"qemu-xhci"* ]] || { log_message "ERROR" "QEMU lacks qemu-xhci device support." "$vm_name"; failures=1; }
+    if [[ "$qdevs" != *"isa-applesmc"* ]]; then
+        log_message "ERROR" "QEMU lacks isa-applesmc device support." "$vm_name" || true
+        failures=1
+    fi
+    if [[ "$qdevs" != *"vmware-svga"* ]]; then
+        log_message "ERROR" "QEMU lacks vmware-svga device support." "$vm_name" || true
+        failures=1
+    fi
+    if [[ "$qdevs" != *"qemu-xhci"* ]]; then
+        log_message "ERROR" "QEMU lacks qemu-xhci device support." "$vm_name" || true
+        failures=1
+    fi
 
     if command -v mcopy >/dev/null 2>&1 && command -v mmd >/dev/null 2>&1 &&
        command -v mdeltree >/dev/null 2>&1 && command -v mtype >/dev/null 2>&1; then
@@ -2749,16 +2902,20 @@ macos_doctor() {
     fi
 
     if [[ "${VM[MACOS_GUEST_AGENT]:-1}" == "1" ]]; then
-        [[ "$qdevs" == *"isa-serial"* ]] || {
-            log_message "ERROR"                 "QEMU lacks isa-serial device support required by mac-guest-agent."                 "$vm_name"
+        if [[ "$qdevs" != *"isa-serial"* ]]; then
+            log_message "ERROR" "QEMU lacks isa-serial device support required by mac-guest-agent." "$vm_name" || true
             failures=1
-        }
+        fi
 
         local agent_socket="$VM_DIR/$vm_name/sockets/mac-guest-agent.sock"
         if vm_is_running "$vm_name"; then
-            [[ -S "$agent_socket" ]] &&                 log_message "INFO"                     "macOS Guest Agent transport socket is present: $agent_socket"                     "$vm_name" ||                 log_message "WARNING"                     "macOS Guest Agent transport socket is not present: $agent_socket"                     "$vm_name"
+            if [[ -S "$agent_socket" ]]; then
+                log_message "INFO" "macOS Guest Agent transport socket is present: $agent_socket" "$vm_name"
+            else
+                log_message "WARNING" "macOS Guest Agent transport socket is not present: $agent_socket" "$vm_name"
+            fi
         else
-            log_message "INFO"                 "macOS Guest Agent enabled; socket will be created at start: $agent_socket"                 "$vm_name"
+            log_message "INFO" "macOS Guest Agent enabled; socket will be created at start: $agent_socket" "$vm_name"
         fi
     else
         log_message "INFO" "macOS Guest Agent disabled" "$vm_name"
@@ -2767,6 +2924,31 @@ macos_doctor() {
     macos_repo_info "$vm_name" || true
     log_message "INFO" "installer-media=${VM[MACOS_INSTALL_MEDIA]:-0}, version=${VM[MACOS_VERSION]:-unknown}" "$vm_name"
     return "$failures"
+}
+
+# OpenCore boots a fixed device set. Stored keys that would change Linux or
+# Windows hardware are kept, but they are not applied. Warn only when they differ.
+# ENABLE_AUDIO=0 is the historical default while HDA is always attached, so it
+# is not treated as a user override.
+macos_note_ignored_settings() {
+    local vm_name="$1"
+    local -n _ign="$2"
+    local notes=() note
+    [[ "${_ign[ENABLE_TPM]:-0}" == "1" ]] && notes+=("ENABLE_TPM=1 (TPM is not attached)")
+    [[ "${_ign[SPICE_ENABLED]:-0}" == "1" ]] && notes+=("SPICE_ENABLED=1 (SPICE is not attached)")
+    [[ "${_ign[DISK_INTERFACE]:-sata}" != "sata" ]] && notes+=("DISK_INTERFACE=${_ign[DISK_INTERFACE]} (disk stays SATA)")
+    local video="${_ign[VIDEO_TYPE]:-vmware}"
+    [[ "$video" != vmware* ]] && notes+=("VIDEO_TYPE=${video} (display stays vmware-svga)")
+    if [[ "${_ign[CPU_TYPE]:-host}" != "host" || "${_ign[HIDE_KVM]:-0}" == "1" ]]; then
+        notes+=("CPU_TYPE=${_ign[CPU_TYPE]:-host} HIDE_KVM=${_ign[HIDE_KVM]:-0} (CPU stays the OpenCore model)")
+    fi
+    [[ "${_ign[ENABLE_UEFI]:-1}" == "0" ]] && notes+=("ENABLE_UEFI=0 (OpenCore always boots UEFI)")
+    if [[ ${#notes[@]} -gt 0 ]]; then
+        for note in "${notes[@]}"; do
+            log_message "WARNING" "macOS start ignores ${note}" "$vm_name"
+        done
+    fi
+    return 0
 }
 
 configure_macos() {
@@ -3104,8 +3286,11 @@ configure_display() {
     local -n _dsp_cmd="$2"
     local headless="$3"
 
-    if [[ "$headless" == "1" ]]; then
-        _dsp_cmd+=("-display" "none"); return 0
+    # Headless suppresses GTK/SDL. SPICE still listens: its own block below
+    # adds -display none together with the spice socket.
+    if [[ "$headless" == "1" && "${_dsp_vm[SPICE_ENABLED]:-0}" != "1" ]]; then
+        _dsp_cmd+=("-display" "none")
+        return 0
     fi
 
     local video="${_dsp_vm[VIDEO_TYPE]:-virtio-vga}"
@@ -3708,12 +3893,21 @@ create() {
         # Physical disks must bypass the host page cache (O_DIRECT).
         # writeback is only appropriate for qcow2 image files.
         VM[DISK_CACHE]="none"
-        local size_bytes
+        local size_bytes=""
         size_bytes=$(lsblk -bno SIZE "$disk_dev" 2>/dev/null | tr -d ' ') || true
-        if [[ -n "$size_bytes" && "$size_bytes" =~ ^[0-9]+$ && "$size_bytes" -gt 0 ]]; then
-            VM[DISK_SIZE]="$(( size_bytes / 1073741824 ))G"
+        if [[ -z "$size_bytes" || ! "$size_bytes" =~ ^[0-9]+$ || "$size_bytes" -le 0 ]]; then
+            if command -v blockdev >/dev/null 2>&1; then
+                size_bytes=$(blockdev --getsize64 "$disk_dev" 2>/dev/null | tr -d ' ') || true
+            fi
+        fi
+        local disk_size_label=""
+        if [[ -n "$size_bytes" && "$size_bytes" =~ ^[0-9]+$ && "$size_bytes" -gt 0 ]] && \
+           disk_size_label=$(bytes_to_disk_size "$size_bytes"); then
+            VM[DISK_SIZE]="$disk_size_label"
         else
-            VM[DISK_SIZE]="unknown"
+            rm -rf "${VM_DIR:?}/${vm_name:?}"
+            log_message "ERROR" "Could not read the size of $disk_dev (tried lsblk and blockdev)." "$vm_name" || true
+            return 1
         fi
         log_message "WARNING" \
             "Physical device '$disk_dev' configured — any existing data WILL be destroyed by the OS installer." \
@@ -3933,6 +4127,7 @@ start() {
     )
 
     if [[ "${VM[OS_TYPE]:-linux}" == "macos" ]]; then
+        macos_note_ignored_settings "$vm_name" VM
         configure_memory VM qemu_cmd
         local macos_smp="${VM[CORES]},cores=${VM[CORES]},threads=1,sockets=1"
         qemu_cmd+=("-smp" "$macos_smp")
@@ -3954,10 +4149,14 @@ start() {
         qemu_cmd+=(
             "-device" "qemu-xhci,id=usb,bus=pcie.0"
             "-device" "usb-kbd,bus=usb.0"
-            "-device" "virtio-serial-pci"
-            "-device" "virtserialport,chardev=chara0,name=org.qemu.guest_agent.0"
-            "-chardev" "socket,id=chara0,path=$VM_DIR/$vm_name/sockets/qga.sock,server=on,wait=off"
         )
+        if [[ "${VM[ENABLE_GUEST_AGENT]:-1}" == "1" ]]; then
+            qemu_cmd+=(
+                "-device" "virtio-serial-pci"
+                "-device" "virtserialport,chardev=chara0,name=org.qemu.guest_agent.0"
+                "-chardev" "socket,id=chara0,path=$VM_DIR/$vm_name/sockets/qga.sock,server=on,wait=off"
+            )
+        fi
 
         configure_display VM qemu_cmd "$headless"
         configure_disk "$vm_name" VM qemu_cmd || return 1
@@ -3979,21 +4178,16 @@ start() {
         # USB host devices attach to the OpenCore qemu-xhci controller.
         configure_usb_passthrough "$vm_name" VM qemu_cmd || return 1
         if [[ -n "${VM[SHARED_FOLDERS]:-}" ]]; then
-            local macos_share_be
-            macos_share_be=$(resolve_share_backend VM)
-            case "$macos_share_be" in
-                smb)
-                    case "${VM[NETWORK_TYPE]:-user}" in
-                        user|nat)
-                            log_message "INFO" "macOS share backend is SMB over user/NAT (\\\\10.0.2.4\\qemu). QEMU slirp SMB is SMB 1.0; modern macOS may refuse it." "$vm_name"
-                            ;;
-                        *)
-                            log_message "WARNING" "SMB shares require NETWORK_TYPE=user or nat. Folder tags are stored but not exported for this macOS VM." "$vm_name"
-                            ;;
-                    esac
+            local macos_share_be="${VM[SHARE_BACKEND]:-auto}"
+            if [[ "$macos_share_be" != "auto" && "$macos_share_be" != "smb" ]]; then
+                log_message "WARNING" "macOS shares always use SMB (first share only). Ignoring SHARE_BACKEND=${macos_share_be}." "$vm_name"
+            fi
+            case "${VM[NETWORK_TYPE]:-user}" in
+                user|nat)
+                    log_message "INFO" "macOS share backend is SMB over user/NAT (\\\\10.0.2.4\\qemu). QEMU slirp SMB is SMB 1.0; modern macOS may refuse it." "$vm_name"
                     ;;
-                virtiofs|virtfs)
-                    log_message "WARNING" "VirtIO-FS/9p have no supported macOS guest driver. Set SHARE_BACKEND=smb with NETWORK_TYPE=user, or share from the host over TAP." "$vm_name"
+                *)
+                    log_message "WARNING" "SMB shares require NETWORK_TYPE=user or nat. Folder tags are stored but not exported for this macOS VM." "$vm_name"
                     ;;
             esac
         fi
@@ -4174,6 +4368,9 @@ delete() {
     teardown_tap_interface "$vm_name" 2>/dev/null || true
     restore_group_drivers  "$vm_name" 2>/dev/null || true
 
+    # Unregister a macOS worktree before the directory disappears. Non-macOS
+    # VMs have no checkout, and a missing path is a no-op.
+    remove_osx_kvm_checkout "$VM_DIR/$vm_name/macos/OSX-KVM"
     rm -rf "${VM_DIR:?}/${vm_name:?}"
     release_flock operation_fd "$VM_DIR/$vm_name/qemu.pid.lock"
     log_message "INFO" "VM deleted: $vm_name"
@@ -4181,7 +4378,40 @@ delete() {
 
 resize_disk() {
     require_qemu_toolchain || return 1
-    local vm_name="$1" new_size="$2"
+    local vm_name="$1"
+    shift
+    local new_size="" saw_force=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --force)
+                saw_force=1
+                shift
+                ;;
+            -*)
+                log_message "ERROR" "Unknown option: $1" "$vm_name"
+                return 1
+                ;;
+            *)
+                if [[ -n "$new_size" ]]; then
+                    log_message "ERROR" "Unexpected argument: $1" "$vm_name"
+                    return 1
+                fi
+                new_size="$1"
+                shift
+                ;;
+        esac
+    done
+    if [[ -z "$new_size" ]]; then
+        log_message "ERROR" "Resize size required. Use e.g. 80G or +20G" "$vm_name"
+        return 1
+    fi
+    if [[ ! "$new_size" =~ ^(\+)?[0-9]+[GMgm]$ ]]; then
+        log_message "ERROR" "Invalid size: '$new_size'. Use e.g. 80G or +20G" "$vm_name"
+        return 1
+    fi
+    if [[ "$saw_force" -eq 1 ]]; then
+        log_message "WARNING" "--force does not resize a running disk. Stop the VM first." "$vm_name"
+    fi
 
     require_vm "$vm_name" exists unlocked || return 1
     local -A VM=()
@@ -4199,12 +4429,12 @@ resize_disk() {
     local operation_fd
     acquire_stopped_vm_lock "$vm_name" operation_fd || return 1
 
-    [[ ! "$new_size" =~ ^(\+)?[0-9]+[GMgm]$ ]] && {
-        log_message "ERROR" "Invalid size: '$new_size'. Use e.g. 80G or +20G" "$vm_name"; return 1; }
-
     log_message "INFO" "Resizing disk to $new_size..." "$vm_name"
-    qemu-img resize "$VM_DIR/$vm_name/disk.qcow2" "$new_size" || {
-        log_message "ERROR" "Resize failed." "$vm_name"; return 1; }
+    if ! qemu-img resize "$VM_DIR/$vm_name/disk.qcow2" "$new_size"; then
+        release_named_lock operation_fd
+        log_message "ERROR" "Resize failed." "$vm_name" || true
+        return 1
+    fi
 
     local json bytes_size=""
     json=$(qemu-img info --output=json "$VM_DIR/$vm_name/disk.qcow2")
@@ -4216,15 +4446,18 @@ resize_disk() {
         else
             VM[DISK_SIZE]="$(( (bytes_size + 1048575) / 1048576 ))M"
         fi
-        save_vm_config "$vm_name" VM
+        if ! save_vm_config "$vm_name" VM; then
+            release_named_lock operation_fd
+            return 1
+        fi
         log_message "INFO" "Disk resized to ${VM[DISK_SIZE]}" "$vm_name"
     fi
-    release_flock operation_fd "$VM_DIR/$vm_name/qemu.pid.lock"
+    release_named_lock operation_fd
 }
 
 # configure VM_NAME — Opens the VM config file directly in the editor.
 # Do not hold qemu.pid.lock while the editor is open: that made `list` report
-# "starting" and blocked start/resize for the whole edit session.
+# "busy" and blocked start/resize for the whole edit session.
 configure() {
     local vm_name="$1"
     require_vm "$vm_name" exists unlocked || return 1
@@ -4317,18 +4550,26 @@ list() {
 
         stat="stopped"
         if vm_is_running "$name"; then stat="running"
-        elif vm_lifecycle_busy "$name"; then stat="starting"
+        elif vm_lifecycle_busy "$name"; then stat="busy"
         fi
 
         lock="$(_list_config_field "$cfg" LOCKED 0)"
         [[ "$lock" == "1" ]] && lock="yes" || lock="no"
         os="$(_list_config_field "$cfg" OS_TYPE "?")"
-        audio="$(_list_config_field "$cfg" ENABLE_AUDIO 0)"
-        [[ "$audio" == "1" ]] && audio="on" || audio="off"
-        tpm="$(_list_config_field "$cfg" ENABLE_TPM 0)"
-        [[ "$tpm" == "1" ]] && tpm="on" || tpm="off"
-        spice="$(_list_config_field "$cfg" SPICE_ENABLED 0)"
-        [[ "$spice" == "1" ]] && spice="on" || spice="off"
+        # macOS always attaches Intel HDA and never attaches TPM or SPICE,
+        # regardless of the stored bits.
+        if [[ "$os" == "macos" ]]; then
+            audio="on"
+            tpm="off"
+            spice="off"
+        else
+            audio="$(_list_config_field "$cfg" ENABLE_AUDIO 0)"
+            [[ "$audio" == "1" ]] && audio="on" || audio="off"
+            tpm="$(_list_config_field "$cfg" ENABLE_TPM 0)"
+            [[ "$tpm" == "1" ]] && tpm="on" || tpm="off"
+            spice="$(_list_config_field "$cfg" SPICE_ENABLED 0)"
+            [[ "$spice" == "1" ]] && spice="on" || spice="off"
+        fi
 
         printf "%-18s %-10s %-8s %-10s %-6s %-5s %-5s\n" \
             "$name" "$stat" "$lock" "$os" "$audio" "$tpm" "$spice"
@@ -4344,14 +4585,23 @@ status() {
 
     local running
     if vm_is_running "$vm_name"; then running="● Running"
-    elif vm_lifecycle_busy "$vm_name"; then running="◐ Starting"
+    elif vm_lifecycle_busy "$vm_name"; then running="◐ Busy"
     else running="○ Stopped"
     fi
     echo ""
     echo "  VM: $vm_name  [$running]"
     echo "  ─────────────────────────────────────────────"
     printf "  %-16s %s\n" "OS Type:"        "${VM[OS_TYPE]:-?}"
-    printf "  %-16s %s\n" "CPU:"            "${VM[CPU_TYPE]} × ${VM[CORES]} cores"
+    if [[ "${VM[OS_TYPE]:-}" == "macos" ]]; then
+        local mac_cpu
+        mac_cpu=$(macos_cpu_model "${VM[MACOS_VERSION]:-sonoma}")
+        printf "  %-16s %s\n" "CPU:" "${mac_cpu%%,*} × ${VM[CORES]} cores"
+        if [[ "${VM[CPU_TYPE]:-host}" != "host" || "${VM[HIDE_KVM]:-0}" == "1" ]]; then
+            printf "  %-16s %s\n" "" "(config CPU_TYPE=${VM[CPU_TYPE]:-host} HIDE_KVM=${VM[HIDE_KVM]:-0} is not applied)"
+        fi
+    else
+        printf "  %-16s %s\n" "CPU:" "${VM[CPU_TYPE]} × ${VM[CORES]} cores"
+    fi
     printf "  %-16s %s\n" "Memory:"         "${VM[MEMORY]}"
     printf "  %-16s %s\n" "Profile:"        "${VM[PERFORMANCE_PROFILE]:-balanced}"
     printf "  %-16s %s\n" "Memory policy:"  "$( [[ "${VM[PERFORMANCE_PROFILE]:-balanced}" == "performance" || "${VM[MEMORY_PREALLOC]:-0}" == "1" ]] && echo "preallocated" || echo "demand-allocated" )"
@@ -4363,8 +4613,19 @@ status() {
     else
         printf "  %-16s %s\n" "Machine:" "${VM[MACHINE_TYPE]} → $effective_machine (${VM[MACHINE_OPTIONS]})"
     fi
-    printf "  %-16s %s\n" "Video:"          "${VM[VIDEO_TYPE]}"
-    printf "  %-16s %s\n" "Disk Interface:" "${VM[DISK_INTERFACE]}"
+    if [[ "${VM[OS_TYPE]:-}" == "macos" ]]; then
+        printf "  %-16s %s\n" "Video:" "vmware-svga"
+        if [[ "${VM[VIDEO_TYPE]:-vmware}" != vmware* ]]; then
+            printf "  %-16s %s\n" "" "(config VIDEO_TYPE=${VM[VIDEO_TYPE]} is not applied)"
+        fi
+        printf "  %-16s %s\n" "Disk Interface:" "sata"
+        if [[ "${VM[DISK_INTERFACE]:-sata}" != "sata" ]]; then
+            printf "  %-16s %s\n" "" "(config DISK_INTERFACE=${VM[DISK_INTERFACE]} is not applied)"
+        fi
+    else
+        printf "  %-16s %s\n" "Video:"          "${VM[VIDEO_TYPE]}"
+        printf "  %-16s %s\n" "Disk Interface:" "${VM[DISK_INTERFACE]}"
+    fi
     printf "  %-16s %s\n" "Disk I/O:"       "${VM[DISK_IO]} / cache=${VM[DISK_CACHE]} / discard=${VM[DISK_DISCARD]}"
     if [[ -n "${VM[DISK_DEV]:-}" ]]; then
         printf "  %-16s %s\n" "Disk Device:"    "${VM[DISK_DEV]} (physical, raw)"
@@ -4373,7 +4634,41 @@ status() {
         printf "  %-16s %s\n" "Disk Size:"      "${VM[DISK_SIZE]}"
     fi
     printf "  %-16s %s\n" "Network:"        "${VM[NETWORK_TYPE]} / ${VM[NETWORK_MODEL]}"
-    printf "  %-16s %s\n" "UEFI:"           "$( [[ "${VM[ENABLE_UEFI]:-0}" == "1" ]] && echo "enabled" || echo "disabled (SeaBIOS)" )"
+    if [[ "${VM[OS_TYPE]:-}" == "macos" ]]; then
+        if [[ "${VM[ENABLE_UEFI]:-1}" == "0" ]]; then
+            printf "  %-16s %s\n" "UEFI:" "enabled (config ENABLE_UEFI=0 is not applied)"
+        else
+            printf "  %-16s %s\n" "UEFI:" "enabled"
+        fi
+        printf "  %-16s %s\n" "Audio:" "Intel HDA"
+        if [[ "${VM[ENABLE_TPM]:-0}" == "1" ]]; then
+            printf "  %-16s %s\n" "TPM:" "off (config ENABLE_TPM=1 is not applied)"
+        else
+            printf "  %-16s %s\n" "TPM:" "off"
+        fi
+        if [[ "${VM[SPICE_ENABLED]:-0}" == "1" ]]; then
+            printf "  %-16s %s\n" "SPICE:" "off (config SPICE_ENABLED=1 is not applied)"
+        else
+            printf "  %-16s %s\n" "SPICE:" "off"
+        fi
+        if [[ "${VM[MACOS_GUEST_AGENT]:-1}" == "1" ]]; then
+            printf "  %-16s %s\n" "Guest agent:" "macOS ISA serial"
+        else
+            printf "  %-16s %s\n" "Guest agent:" "off"
+        fi
+    else
+        printf "  %-16s %s\n" "UEFI:" "$( [[ "${VM[ENABLE_UEFI]:-0}" == "1" ]] && echo "enabled" || echo "disabled (SeaBIOS)" )"
+        if [[ "${VM[ENABLE_AUDIO]:-0}" != "1" ]]; then
+            printf "  %-16s %s\n" "Audio:" "off"
+        elif [[ -n "${VM[AUDIO_PASSTHROUGH_PCI]:-}" && "${VM[AUDIO_PASSTHROUGH_PCI]}" != "0" ]]; then
+            printf "  %-16s %s\n" "Audio:" "VFIO ${VM[AUDIO_PASSTHROUGH_PCI]}"
+        else
+            printf "  %-16s %s\n" "Audio:" "emulated Intel HDA"
+        fi
+        printf "  %-16s %s\n" "TPM:" "$( [[ "${VM[ENABLE_TPM]:-0}" == "1" ]] && echo "on" || echo "off" )"
+        printf "  %-16s %s\n" "SPICE:" "$( [[ "${VM[SPICE_ENABLED]:-0}" == "1" ]] && echo "on" || echo "off" )"
+        printf "  %-16s %s\n" "Guest agent:" "$( [[ "${VM[ENABLE_GUEST_AGENT]:-1}" == "1" ]] && echo "on (sockets/qga.sock)" || echo "off" )"
+    fi
     local effective_share; effective_share=$(resolve_share_backend VM)
     printf "  %-16s %s\n" "Share backend:"  "${VM[SHARE_BACKEND]:-auto} (effective: $effective_share)"
     printf "  %-16s %s\n" "Security:" "$( [[ "${VM[LOCKED]:-0}" == "1" ]] && echo "locked" || echo "unlocked" )"
@@ -4412,14 +4707,25 @@ tune_vm() {
     [[ "$profile" =~ ^(balanced|performance)$ ]] || {
         log_message "ERROR" "Invalid profile: '$profile'. Use: balanced, performance"; return 1; }
     require_vm "$vm_name" exists unlocked || return 1
+    # Assigned indirectly by acquire_stopped_vm_lock through a nameref.
+    # shellcheck disable=SC2034
     local operation_fd
     acquire_stopped_vm_lock "$vm_name" operation_fd || return 1
     local -A VM=()
-    load_vm_config "$vm_name" VM || return 1
-    [[ "$profile" != "performance" ]] || validate_performance_memory "$vm_name" "${VM[MEMORY]}" || return 1
+    if ! load_vm_config "$vm_name" VM; then
+        release_named_lock operation_fd
+        return 1
+    fi
+    if [[ "$profile" == "performance" ]] && ! validate_performance_memory "$vm_name" "${VM[MEMORY]}"; then
+        release_named_lock operation_fd
+        return 1
+    fi
     VM[PERFORMANCE_PROFILE]="$profile"
-    save_vm_config "$vm_name" VM || return 1
-    release_flock operation_fd "$VM_DIR/$vm_name/qemu.pid.lock"
+    if ! save_vm_config "$vm_name" VM; then
+        release_named_lock operation_fd
+        return 1
+    fi
+    release_named_lock operation_fd
     log_message "INFO" "VM $vm_name tuned for profile: $profile" "$vm_name"
 }
 
@@ -4670,11 +4976,9 @@ restart() {
 
 console() {
     local vm_name="$1"; shift
-    local mode="qmp"
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --qmp) mode="qmp"; shift ;;
-            --monitor) mode="monitor"; shift ;;
+            --qmp) shift ;;
             *) log_message "ERROR" "Unknown option: $1"; return 1 ;;
         esac
     done
@@ -4686,16 +4990,11 @@ console() {
     local socket="$VM_DIR/$vm_name/sockets/qmp.sock"
     [[ -S "$socket" ]] || {
         log_message "ERROR" "QMP socket not available: $socket" "$vm_name"; return 1; }
-    if [[ "$mode" == "qmp" ]]; then
-        log_message "INFO" "Interactive QMP session (Ctrl-C to exit). Capabilities negotiated on connect." "$vm_name"
-        {
-            printf '%s\n' '{"execute":"qmp_capabilities"}'
-            cat
-        } | nc -U -N "$socket"
-    else
-        log_message "ERROR" "HMP monitor socket is not exposed by qemate; use --qmp" "$vm_name"
-        return 1
-    fi
+    log_message "INFO" "Interactive QMP session (Ctrl-C to exit). Capabilities negotiated on connect." "$vm_name"
+    {
+        printf '%s\n' '{"execute":"qmp_capabilities"}'
+        cat
+    } | nc -U -N "$socket"
 }
 
 clone_vm() {
@@ -4730,7 +5029,12 @@ clone_vm() {
     VM[NAME]="$dst"
     VM[MAC_ADDRESS]=$(generate_mac_address "$dst")
     VM[LOCKED]="0"
-    # Do not copy live install media state blindly for macOS; user can re-attach.
+    # Recovery images and the OSX-KVM checkout are not copied. Clear the flag
+    # so the clone does not expect BaseSystem.img that was left behind.
+    if [[ "${VM[OS_TYPE]:-}" == "macos" && "${VM[MACOS_INSTALL_MEDIA]:-0}" == "1" ]]; then
+        VM[MACOS_INSTALL_MEDIA]=0
+        log_message "WARNING" "Recovery media was not copied. Reattach it with macos-recovery or macos-install." "$dst"
+    fi
     save_vm_config "$dst" VM || {
         rm -rf "${VM_DIR:?}/${dst:?}"
         release_flock src_fd "$VM_DIR/$src/qemu.pid.lock"
@@ -4740,14 +5044,20 @@ clone_vm() {
     local src_disk="$VM_DIR/$src/disk.qcow2" dst_disk="$VM_DIR/$dst/disk.qcow2"
     if [[ -f "$src_disk" ]]; then
         if [[ "$full_copy" == "1" ]]; then
-            qemu-img convert -O qcow2 "$src_disk" "$dst_disk" || {
-                log_message "ERROR" "Failed to copy disk image"; rm -rf "${VM_DIR:?}/${dst:?}"
-                release_flock src_fd "$VM_DIR/$src/qemu.pid.lock"; return 1; }
+            if ! qemu-img convert -O qcow2 "$src_disk" "$dst_disk"; then
+                rm -rf "${VM_DIR:?}/${dst:?}"
+                release_flock src_fd "$VM_DIR/$src/qemu.pid.lock"
+                log_message "ERROR" "Failed to copy disk image" || true
+                return 1
+            fi
         else
             # Backing-file clone: cheap, shares unchanged clusters with the source.
-            qemu-img create -f qcow2 -b "$src_disk" -F qcow2 "$dst_disk" || {
-                log_message "ERROR" "Failed to create linked clone disk"; rm -rf "${VM_DIR:?}/${dst:?}"
-                release_flock src_fd "$VM_DIR/$src/qemu.pid.lock"; return 1; }
+            if ! qemu-img create -f qcow2 -b "$src_disk" -F qcow2 "$dst_disk"; then
+                rm -rf "${VM_DIR:?}/${dst:?}"
+                release_flock src_fd "$VM_DIR/$src/qemu.pid.lock"
+                log_message "ERROR" "Failed to create linked clone disk" || true
+                return 1
+            fi
         fi
         chmod 600 "$dst_disk"
         if [[ "$full_copy" != "1" ]]; then
@@ -4777,6 +5087,8 @@ clone_vm() {
             cp -n "$src_macos/assets/"* "$dst_macos/assets/" 2>/dev/null || true
             chmod 600 "$dst_macos/assets/"* 2>/dev/null || true
             chmod 700 "$dst_macos" "$dst_macos/assets" 2>/dev/null || true
+        else
+            log_message "WARNING" "No permanent OpenCore assets were copied. Run macos-install or macos-refresh on the clone before starting it." "$dst"
         fi
         # Preserve version metadata for macos-doctor when present.
         [[ -f "$src_macos/version" ]] && cp -n "$src_macos/version" "$dst_macos/version" 2>/dev/null || true
@@ -4823,7 +5135,8 @@ VM
   logs    <name> [-f] [-n N] [--qemate|--qemu|--supervisor]
   clone   <src> <dst> [--full]
   delete  <name> [--force]
-  resize  <name> <SIZE|+SIZE>             VM must be stopped
+  resize  <name> [--force] <SIZE|+SIZE>  VM must be stopped
+      --force may appear before or after the size and does not resize a running disk.
   list
   status  <name>
   config  <name>     edit VM config in \$EDITOR
@@ -4848,7 +5161,7 @@ MACOS
   macos-efi-restore <name> <backup-file>
       Restore a named OpenCore image from macos/backups/.
   macos-refresh  <name>
-      Update (or re-clone) the VM's isolated OSX-KVM checkout.
+      Update the shared OSX-KVM cache, then the VM checkout (worktree or local clone).
   macos-doctor   <name>
       Validate OpenCore/OVMF/recovery assets, KVM and QEMU macOS devices.
 

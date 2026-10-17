@@ -2,6 +2,31 @@
 
 All notable changes to qemate are documented in this file.
 
+## [6.0.1] - 2026-10-12
+
+Correctness fixes for lifecycle reporting, macOS checkouts, and documented behavior.
+
+### Fixed
+- `macos-doctor` finishes every check. `log_message ERROR` returns 1, and Bash `set -e` was aborting the report before later failures were recorded.
+- macOS OSX-KVM worktrees are detected (`.git` is a file, not a directory). Eject and delete unregister the worktree before removing it, and prepare prunes stale registrations so the next `worktree add` succeeds.
+- `macos-refresh` updates the shared cache, then resets a worktree to that cache HEAD. A local clone still fetches from the cache, falling back to `origin`.
+- `clone` of a macOS VM no longer leaves `MACOS_INSTALL_MEDIA=1` when recovery media was not copied, and warns when permanent OpenCore assets are missing.
+- `start --headless` on Linux and Windows still attaches SPICE when `SPICE_ENABLED=1`. macOS never attaches SPICE and warns at start when stored keys differ from the OpenCore device set.
+- `list` reports a held lifecycle lock as `busy`. macOS rows show effective audio, TPM, and SPICE. `status` prints audio, TPM, SPICE, and the guest agent, and shows the devices macOS actually uses.
+- macOS shares always use SMB (the first share). A non-SMB `SHARE_BACKEND` is ignored with a warning at start.
+- A missing `ss` warns once instead of silently treating every host port as free.
+- Physical-disk create records GiB when the size divides evenly, otherwise MiB. If both `lsblk` and `blockdev` fail, create stops instead of storing `unknown`.
+- `resize --force` is accepted before or after the size and does not resize a running disk.
+- `console --monitor` is removed. The control socket is QMP only.
+- VMHide no longer writes an unread `macos/vmhide.env`. Removing VMHide still deletes an old copy.
+- Stopped-VM commands release the lifecycle lock before returning on early errors.
+- Linux and Windows omit the VirtIO guest-agent socket when `ENABLE_GUEST_AGENT=0`. Existing configs stay on.
+- `install.sh` warns when QEMU, `flock`, `setsid`, or `nc -U` is missing and still installs. Bash older than 5 remains a hard failure. Installers look only at `src/qemate.sh` and `docs/man/qemate.1`.
+
+### Changed
+- `ENABLE_VIRTIO=0` is documented as the display and NIC fallback it actually is. Disk, balloon, rng, tablet, and the guest agent are unchanged.
+- `nat` is documented as an alias of the `user` (SLiRP) backend.
+
 ## [6.0.0] - 2026-10-09
 
 QEMU 11 baseline and performance/stability modernization.
